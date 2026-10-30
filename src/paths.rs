@@ -11,8 +11,8 @@ pub struct Paths {
 impl Paths {
     pub fn from_home(home: PathBuf) -> Self {
         Self {
-            config_file: home.join(".config/herdr-reviewq/config.toml"),
-            state_dir: home.join(".local/state/herdr-reviewq"),
+            config_file: home.join(".config/herdr-app-reviewq/config.toml"),
+            state_dir: home.join(".local/state/herdr-app-reviewq"),
             home,
         }
     }
@@ -26,14 +26,13 @@ impl Paths {
     pub fn lock_file(&self) -> PathBuf { self.state_dir.join("daemon.lock") }
     pub fn log_file(&self) -> PathBuf { self.state_dir.join("daemon.log") }
     pub fn setup_logs_dir(&self) -> PathBuf { self.state_dir.join("logs") }
-    /// Log do TUI (motivo de saída forçada, pânicos fora da thread da UI).
-    pub fn tui_log_file(&self) -> PathBuf { self.setup_logs_dir().join("tui.log") }
-    /// Log do setup de um PR; única convenção do nome, usada pelo daemon (grava) e pelo TUI (`l`).
+    /// Log do setup de um PR; única convenção do nome, usada pelo daemon (grava) e pelo painel (`l`).
     pub fn setup_log(&self, key: &crate::state::PrKey) -> PathBuf {
         self.setup_logs_dir().join(format!("{}-pr-{}.log", key.repo.replace('/', "-"), key.number))
     }
     pub fn requests_dir(&self) -> PathBuf { self.state_dir.join("requests") }
-    pub fn ui_lock_file(&self) -> PathBuf { self.state_dir.join("ui.lock") }
+    /// Avisos para o mod do herdr-app mostrar (ver `herdr::Notice`).
+    pub fn notifications_file(&self) -> PathBuf { self.state_dir.join("notifications.jsonl") }
 }
 
 #[cfg(test)]
@@ -44,6 +43,6 @@ mod tests {
     #[test]
     fn setup_log_names_repo_and_pr() {
         let p = Paths::from_home(PathBuf::from("/h"));
-        assert_eq!(p.setup_log(&PrKey::new("o/r", 7)), PathBuf::from("/h/.local/state/herdr-reviewq/logs/o-r-pr-7.log"));
+        assert_eq!(p.setup_log(&PrKey::new("o/r", 7)), PathBuf::from("/h/.local/state/herdr-app-reviewq/logs/o-r-pr-7.log"));
     }
 }

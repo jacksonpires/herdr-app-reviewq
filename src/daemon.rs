@@ -4,7 +4,7 @@ use crate::executor::{self, Ctx};
 use crate::facts::{self, divergence, Divergence};
 use crate::git::Git;
 use crate::github::{self, ErrorKind, FetchError, RepoSnapshot, Snapshot};
-use crate::herdr::{Herdr, HerdrCli};
+use crate::herdr::{Herdr, HerdrApp};
 use crate::paths::Paths;
 use crate::reconcile::{reconcile, Input, Op};
 use crate::requests::{self, Entry, Request, RequestKind};
@@ -59,8 +59,6 @@ pub struct Daemon<'a> {
     cfg: Config,
     runner: &'a dyn Runner,
     herdr: &'a dyn Herdr,
-    /// Cliente herdr do painel (timeout curto por chamada); por padrão o mesmo `herdr`.
-    ui_herdr: &'a dyn Herdr,
     pub state: State,
     job: Option<SetupJob>,
     job_pid: Option<u32>,
@@ -70,15 +68,6 @@ pub struct Daemon<'a> {
     pub(crate) notify_backoff: Duration,
     wrap: Wrap,
     pub(crate) counter_requested: bool,
-    /// O painel já foi garantido nesta execução (depois disso o daemon não o recria).
-    pub(crate) panel_ensured: bool,
-    panel_alerted: bool,
-    /// Falhas seguidas do `ensure` do painel (o alerta só sai a partir da 2ª).
-    pub(crate) panel_failures: u32,
-    pub(crate) panel_next_try: Option<Instant>,
-    pub(crate) panel_backoff: Duration,
-    /// Já rodou um tick nesta execução (no primeiro, o painel vem antes do poll).
-    ticked: bool,
     last_extras: Option<Instant>,
     /// Sync pedido: coleta os extras no próximo tick, fora da cadência.
     pub(crate) extras_requested: bool,
@@ -86,14 +75,6 @@ pub struct Daemon<'a> {
 
 /// Prazo total da coleta de extras (agentes, CI e meus PRs) num tick.
 const EXTRAS_BUDGET: Duration = Duration::from_secs(30);
-
-/// Linha do log quando o painel fica de pé; registra a recuperação depois de falhas.
-fn panel_ok_message(failures: u32) -> String {
-    match failures {
-        0 => "painel reviewq garantido".into(),
-        n => format!("painel reviewq garantido (recuperado depois de {n} falhas seguidas)"),
-    }
-}
 
 impl<'a> Daemon<'a> {
     pub fn new(paths: Paths, cfg: Config, runner: &'a dyn Runner, herdr: &'a dyn Herdr, wrap: Wrap) -> Result<Self> {
@@ -108,7 +89,6 @@ impl<'a> Daemon<'a> {
             cfg,
             runner,
             herdr,
-            ui_herdr: herdr,
             state,
             job: None,
             job_pid: None,
@@ -118,12 +98,6 @@ impl<'a> Daemon<'a> {
             notify_backoff: Duration::from_secs(30),
             wrap,
             counter_requested: false,
-            panel_ensured: false,
-            panel_alerted: false,
-            panel_failures: 0,
-            panel_next_try: None,
-            panel_backoff: Duration::from_secs(30),
-            ticked: false,
             last_extras: None,
             extras_requested: false,
         };
@@ -134,49 +108,8 @@ impl<'a> Daemon<'a> {
         Ok(d)
     }
 
-    /// Cliente herdr usado para garantir o painel (o daemon passa um com timeout curto).
-    pub fn with_ui_herdr(mut self, ui_herdr: &'a dyn Herdr) -> Self {
-        self.ui_herdr = ui_herdr;
-        self
-    }
-
     fn save(&self) -> Result<()> {
         self.state.save(&self.paths.state_file())
-    }
-
-    /// Tenta garantir o painel `reviewq`. Falha: nova tentativa com backoff (30 s dobrando até
-    /// 300 s), o que também limita panes reabertos em sequência; um único alerta por execução, só a
-    /// partir da 2ª falha seguida (uma falha isolada, como o herdr ainda subindo, não incomoda).
-    pub(crate) fn ensure_panel_now(&mut self) {
-        let deadline = Instant::now() + crate::ui::ENSURE_TOTAL;
-        match crate::ui::ensure(self.ui_herdr, &self.paths.ui_lock_file(), &self.paths.home, deadline, crate::ui::LOCK_WAIT_DAEMON) {
-            Ok(_) => {
-                self.panel_ensured = true;
-                self.panel_next_try = None;
-                info(&panel_ok_message(self.panel_failures));
-                self.panel_failures = 0;
-            }
-            Err(e) => {
-                self.panel_failures += 1;
-                info(&format!("painel reviewq (falha {} seguida): {e:#}", self.panel_failures));
-                if self.panel_failures >= 2 && !self.panel_alerted {
-                    self.state.push_alert(format!("painel reviewq não abriu: {e:#}"));
-                    self.panel_alerted = true;
-                    if let Err(e) = self.save() {
-                        info(&format!("{e:#}"));
-                    }
-                }
-                self.panel_next_try = Some(Instant::now() + self.panel_backoff);
-                self.panel_backoff = (self.panel_backoff * 2).min(Duration::from_secs(300));
-            }
-        }
-    }
-
-    pub(crate) fn maybe_ensure_panel(&mut self) {
-        if self.panel_ensured || stopping() || self.panel_next_try.is_some_and(|t| Instant::now() < t) {
-            return;
-        }
-        self.ensure_panel_now();
     }
 
     fn recover_orphan_setup(&mut self) {
@@ -212,11 +145,6 @@ impl<'a> Daemon<'a> {
         if stopping() {
             return;
         }
-        // ao subir, o painel não espera a criação de worktrees nem a coleta (depois do sucesso,
-        // a chamada do fim do tick é barata: `panel_ensured` curto-circuita)
-        if !std::mem::replace(&mut self.ticked, true) {
-            self.maybe_ensure_panel();
-        }
         let due = self.last_poll.is_none_or(|t| t.elapsed() >= Duration::from_secs(self.cfg.poll_interval_secs));
         if force || due {
             self.last_poll = Some(Instant::now());
@@ -226,7 +154,6 @@ impl<'a> Daemon<'a> {
         self.deliver_notifications();
         self.maybe_collect_reviews_today();
         self.maybe_collect_extras();
-        self.maybe_ensure_panel();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -253,7 +180,7 @@ impl<'a> Daemon<'a> {
         match auth_err {
             Some(msg) if !self.state.auth_error_notified => {
                 info(&format!("gh sem autenticação: {msg}"));
-                if self.herdr.notify("reviewq: gh sem autenticação", "rode gh auth login nesta máquina", &self.cfg.notify.sound).is_ok() {
+                if self.herdr.notify("reviewq: gh sem autenticação", "rode gh auth login nesta máquina", &self.cfg.notify.sound, None).is_ok() {
                     self.state.auth_error_notified = true;
                 }
             }
@@ -677,12 +604,10 @@ impl<'a> Daemon<'a> {
         self.last_notify_try = Some(Instant::now());
         for key in pending {
             let Some(rec) = self.state.get(&key).cloned() else { continue };
-            if let Err(e) = self.herdr.notify(&format!("#{} pronto para review", key.number), &rec.title, &self.cfg.notify.sound) {
+            let space = rec.workspace_id.as_deref();
+            if let Err(e) = self.herdr.notify(&format!("#{} pronto para review", key.number), &rec.title, &self.cfg.notify.sound, space) {
                 info(&format!("{key}: notificação falhou: {e:#}"));
                 continue;
-            }
-            if let Some(ws) = &rec.workspace_id {
-                let _ = self.herdr.report_metadata(ws, &format!("#{} pronto", key.number));
             }
             if let Some(r) = self.state.get_mut(&key) {
                 r.notify_pending = false;
@@ -842,10 +767,8 @@ pub fn run(paths: Paths) -> Result<()> {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     let runner = RealRunner;
-    let herdr = HerdrCli::new(&runner, cfg.herdr_session.clone());
-    // o painel usa a sessão da config (nunca o ambiente) com timeout curto por chamada
-    let ui_herdr = HerdrCli::new(&runner, cfg.herdr_session.clone()).with_timeout(crate::ui::UI_CALL_TIMEOUT);
-    let mut d = Daemon::new(paths, cfg, &runner, &herdr, mise_wrap)?.with_ui_herdr(&ui_herdr);
+    let herdr = HerdrApp::new(&runner, paths.notifications_file());
+    let mut d = Daemon::new(paths, cfg, &runner, &herdr, mise_wrap)?;
     info("daemon iniciado");
     while !stopping() {
         d.tick();
@@ -925,6 +848,7 @@ mod tests {
         assert!(d.state.setup_process.is_none());
         d.deliver_notifications();
         assert!(herdr.notifications.borrow().iter().any(|n| n.contains("#7")));
+        assert_eq!(herdr.notified_spaces.borrow().last().cloned().flatten(), d.state.get(&key).unwrap().workspace_id, "o clique no aviso leva ao space do PR");
         assert!(!d.state.get(&key).unwrap().notify_pending);
         let wt = d.state.get(&key).unwrap().path.clone();
         assert!(wt.join("node_modules/.setup-done").exists());
@@ -1172,41 +1096,6 @@ mod tests {
         assert_eq!(d.state.reviews_today, before, "tentativa cancelada é descartada");
         assert_eq!(d.state.reviews_today.failures, 0);
         assert!(d.state.reviews_today.backoff_until.is_none());
-    }
-
-    /// Runner que anota, na primeira chamada ao `gh`, quantos workspaces o painel já criou.
-    struct OrderProbe<'h> {
-        gh: FakeRunner,
-        herdr: &'h FakeHerdr,
-        panel_before_first_gh: std::cell::Cell<Option<usize>>,
-    }
-
-    impl Runner for OrderProbe<'_> {
-        fn run(&self, c: &Cmd) -> Result<crate::runner::Output> {
-            if c.program == "gh" {
-                if self.panel_before_first_gh.get().is_none() {
-                    self.panel_before_first_gh.set(Some(self.herdr.created_cwds.borrow().len()));
-                }
-                self.gh.run(c)
-            } else {
-                RealRunner.run(c)
-            }
-        }
-    }
-
-    #[test]
-    fn first_tick_ensures_panel_before_polling() {
-        let fx = fixture("feat/x");
-        let paths = Paths::from_home(fx.root.join("home"));
-        let herdr = FakeHerdr::new();
-        let runner = OrderProbe { gh: FakeRunner::new(), herdr: &herdr, panel_before_first_gh: Default::default() };
-        runner.gh.on("q=repo:o/r", Output::ok(&page_json("cirdes", &[], None)));
-        runner.gh.on("viewer", Output::ok(VIEWER));
-        runner.gh.on("reviewed-by:cirdes", Output::ok(&reviewed(vec![])));
-        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
-        d.tick();
-        assert!(d.panel_ensured);
-        assert_eq!(runner.panel_before_first_gh.get(), Some(1), "o painel sobe antes da primeira chamada ao gh");
     }
 
     #[test]
@@ -1523,75 +1412,6 @@ mod tests {
         assert!(d.state.alerts.iter().any(|a| a.message.contains("não confirmei")));
         let _ = other.kill();
         let _ = other.wait();
-    }
-
-    #[test]
-    fn panel_is_ensured_once_per_start_with_backoff() {
-        let fx = fixture("feat/x");
-        let paths = Paths::from_home(fx.root.join("home"));
-        let runner = Routing { gh: FakeRunner::new() };
-        let herdr = FakeHerdr::new();
-        herdr.fail_herdr.set(true);
-        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
-        let panel_alerts = |d: &Daemon| d.state.alerts.iter().filter(|a| a.message.contains("painel")).count();
-        d.ensure_panel_now();
-        assert!(!d.panel_ensured);
-        assert_eq!(panel_alerts(&d), 0, "uma falha isolada não vira alerta");
-        d.ensure_panel_now(); // 2ª falha seguida: alerta
-        assert_eq!(panel_alerts(&d), 1);
-        d.ensure_panel_now(); // 3ª: sem segundo alerta
-        assert_eq!(panel_alerts(&d), 1);
-        assert_eq!(d.panel_failures, 3);
-        herdr.fail_herdr.set(false);
-        d.ensure_panel_now();
-        assert!(d.panel_ensured);
-        assert_eq!(d.panel_failures, 0, "sucesso zera a sequência de falhas");
-        let n = herdr.workspaces.borrow().len();
-        // fechado pelo usuário depois do sucesso: o daemon não recria
-        herdr.workspaces.borrow_mut().clear();
-        d.maybe_ensure_panel();
-        assert_eq!(herdr.workspaces.borrow().len(), 0, "não recria depois do primeiro sucesso (era {n})");
-    }
-
-    #[test]
-    fn panel_success_message_records_recovery() {
-        assert_eq!(panel_ok_message(0), "painel reviewq garantido");
-        assert_eq!(panel_ok_message(2), "painel reviewq garantido (recuperado depois de 2 falhas seguidas)");
-    }
-
-    #[test]
-    fn maybe_ensure_panel_honors_next_try_and_doubles_backoff() {
-        let fx = fixture("feat/x");
-        let paths = Paths::from_home(fx.root.join("home"));
-        let runner = Routing { gh: FakeRunner::new() };
-        let herdr = FakeHerdr::new();
-        herdr.fail_list_workspaces.set(true);
-        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
-        assert_eq!(d.panel_backoff, Duration::from_secs(30));
-        d.maybe_ensure_panel(); // primeira tentativa: falha e agenda a próxima
-        let next = d.panel_next_try.expect("falha agenda nova tentativa");
-        assert!(next > Instant::now() + Duration::from_secs(25), "primeira espera é ~30 s");
-        assert_eq!(d.panel_backoff, Duration::from_secs(60));
-
-        // antes do prazo: não toca no herdr
-        herdr.fail_list_workspaces.set(false);
-        d.maybe_ensure_panel();
-        assert!(herdr.created_cwds.borrow().is_empty(), "antes de panel_next_try não chama o herdr");
-        assert!(!d.panel_ensured);
-
-        // prazo vencido (tempo injetado no campo): tenta e consegue
-        d.panel_next_try = Some(Instant::now() - Duration::from_secs(1));
-        d.maybe_ensure_panel();
-        assert!(d.panel_ensured);
-        assert_eq!(herdr.created_cwds.borrow().len(), 1);
-
-        // o backoff dobra até 300 s
-        let mut d2 = Daemon::new(Paths::from_home(fx.root.join("home2")), config(&fx, "true"), &runner, &herdr, sh).unwrap();
-        herdr.fail_herdr.set(true);
-        for _ in 0..6 {
-            d2.ensure_panel_now();
-        }
-        assert_eq!(d2.panel_backoff, Duration::from_secs(300));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Início do trabalho: agentes (Claude/Codex) que o herdr vê dentro de um worktree de review.
+//! Início do trabalho: agentes (Claude/Codex) que o herdr-core vê dentro de um worktree de review.
 
 use crate::herdr::AgentInfo;
 use crate::state::{PrKey, State};
@@ -13,19 +13,39 @@ fn abs(v: &Value, k: &str) -> Option<PathBuf> {
     p.is_absolute().then_some(p)
 }
 
-/// `result` do `herdr agent list`. Entradas sem nome ou sem nenhum caminho absoluto são ignoradas.
-pub fn parse_agents(result: &Value) -> Vec<AgentInfo> {
-    result
-        .get("agents")
+/// Nome do agente como o reviewq grava: o `hc` chama o Claude Code de `claude-code`.
+fn agent_name(hc: &str) -> &str {
+    match hc {
+        "claude-code" => "claude",
+        other => other,
+    }
+}
+
+/// Terminais vivos do `hc ls --json` com o endereço de cada um. Sem nome de agente ou sem
+/// caminho absoluto, a entrada é ignorada; o `foreground_cwd` vem depois, do `hc get`.
+pub fn parse_agents(ls: &Value) -> Vec<(String, AgentInfo)> {
+    ls.get("terminals")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|a| {
-            let agent = a.get("agent")?.as_str()?.to_string();
-            let (cwd, foreground_cwd) = (abs(a, "cwd"), abs(a, "foreground_cwd"));
-            (cwd.is_some() || foreground_cwd.is_some()).then_some(AgentInfo { agent, cwd, foreground_cwd })
+        .filter(|t| t.get("state").and_then(Value::as_str) == Some("live"))
+        .filter_map(|t| {
+            let address = t.get("address")?.as_str()?.to_string();
+            let agent = agent_name(t.get("agent")?.as_str()?).to_string();
+            let cwd = abs(t, "cwd")?;
+            Some((address, AgentInfo { agent, cwd: Some(cwd), foreground_cwd: None }))
         })
         .collect()
+}
+
+/// Agentes que o reviewq acompanha.
+pub fn is_known(agent: &str) -> bool {
+    KNOWN.contains(&agent)
+}
+
+/// Diretório do programa em primeiro plano, do `hc get <t> --json`.
+pub fn foreground_cwd(get: &Value) -> Option<PathBuf> {
+    abs(get.get("foreground")?, "cwd")
 }
 
 fn canon(p: &Path) -> PathBuf {
@@ -37,7 +57,7 @@ fn canon(p: &Path) -> PathBuf {
 pub fn apply_agents(state: &mut State, agents: &[AgentInfo], now: DateTime<Utc>) -> Vec<PrKey> {
     let mut known: Vec<(&str, Vec<PathBuf>)> = agents
         .iter()
-        .filter(|a| KNOWN.contains(&a.agent.as_str()))
+        .filter(|a| is_known(&a.agent))
         .map(|a| (a.agent.as_str(), [&a.cwd, &a.foreground_cwd].into_iter().flatten().map(|p| canon(p)).collect()))
         .collect();
     // desempate determinístico quando há mais de um agente no mesmo worktree
@@ -87,28 +107,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_real_agent_list() {
-        let result = json!({"agents": [
-            {"agent": "claude", "agent_status": "done", "cwd": "/w/pr-15791", "foreground_cwd": "/w/pr-15791/src",
-             "pane_id": "w26:p1", "workspace_id": "w26"},
-            {"agent": "codex", "agent_status": "working", "foreground_cwd": "/w/pr-2"},
-            {"agent": "claude", "agent_status": "idle"},
-            {"agent": "claude", "cwd": "relativo/pr-3"},
-            {"cwd": "/w/pr-4"}
-        ], "type": "agent_list"});
-        let agents = parse_agents(&result);
+    fn parses_live_terminals_of_hc_ls() {
+        let ls = json!({"hidden_finished": 1, "terminals": [
+            {"address": "t2", "agent": "claude-code", "cwd": "/w/pr-15791", "state": "live", "status": "working"},
+            {"address": "t3", "agent": "codex", "cwd": "/w/pr-2", "state": "live"},
+            {"address": "t4", "agent": "zsh", "cwd": "/w/pr-3", "state": "live"},
+            {"address": "t5", "agent": "claude-code", "cwd": "/w/pr-4", "state": "finished"},
+            {"address": "t6", "agent": "claude-code", "cwd": "relativo/pr-5", "state": "live"},
+            {"address": "t7", "cwd": "/w/pr-6", "state": "live"}
+        ]});
+        let agents = parse_agents(&ls);
         assert_eq!(
             agents,
             vec![
-                AgentInfo {
-                    agent: "claude".into(),
-                    cwd: Some("/w/pr-15791".into()),
-                    foreground_cwd: Some("/w/pr-15791/src".into())
-                },
-                AgentInfo { agent: "codex".into(), cwd: None, foreground_cwd: Some("/w/pr-2".into()) },
+                ("t2".into(), AgentInfo { agent: "claude".into(), cwd: Some("/w/pr-15791".into()), foreground_cwd: None }),
+                ("t3".into(), AgentInfo { agent: "codex".into(), cwd: Some("/w/pr-2".into()), foreground_cwd: None }),
+                ("t4".into(), AgentInfo { agent: "zsh".into(), cwd: Some("/w/pr-3".into()), foreground_cwd: None }),
             ]
         );
         assert!(parse_agents(&json!({"nada": 1})).is_empty());
+    }
+
+    #[test]
+    fn reads_foreground_cwd_of_hc_get() {
+        let get = json!({"address": "t2", "cwd": "/home", "foreground": {"argv": ["claude"], "cwd": "/w/pr-1/src"}});
+        assert_eq!(foreground_cwd(&get), Some(PathBuf::from("/w/pr-1/src")));
+        assert_eq!(foreground_cwd(&json!({"address": "t2"})), None);
+        assert_eq!(foreground_cwd(&json!({"foreground": {"cwd": "rel"}})), None);
     }
 
     #[test]

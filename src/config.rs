@@ -8,8 +8,6 @@ pub struct Config {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
     pub worktrees_dir: PathBuf,
-    #[serde(default)]
-    pub herdr_session: Option<String>,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
     /// Espera depois que o PR sai da lista antes de remover o worktree.
@@ -161,7 +159,6 @@ sound = "done"
         assert_eq!(cfg.notify.sound, "done");
         assert_eq!(cfg.step_timeout_secs, 900);
         assert_eq!(cfg.remove_grace_secs, 900);
-        assert!(cfg.herdr_session.is_none());
         assert!(cfg.repo("acme/app").is_some());
         assert!(cfg.repo("outro/repo").is_none());
     }

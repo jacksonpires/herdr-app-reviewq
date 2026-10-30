@@ -3,6 +3,7 @@ use crate::state::{Ownership, Phase, PrKey, PrRecord, Remote, State};
 use crate::status::phase_label;
 use crate::today::{ago, local_hm, opened_24h_label, start_label, valid_success};
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -12,7 +13,7 @@ pub struct ViewConfig {
     pub remove_grace: chrono::Duration,
 }
 
-/// Fatos do disco que o estado não carrega (calculados no loop do TUI).
+/// Fatos do disco que o estado não carrega.
 #[derive(Debug, Clone, Default)]
 pub struct UiFacts {
     /// PRs cujo worktree (`path`) não existe mais.
@@ -20,7 +21,8 @@ pub struct UiFacts {
 }
 
 /// Identidade de uma linha: o mesmo PR pode aparecer como review e como meu PR.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RowId {
     Review(PrKey),
     Mine(PrKey),
@@ -42,7 +44,8 @@ impl RowId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Section {
     Started,
     Pending,
@@ -52,7 +55,7 @@ pub enum Section {
     Leaving,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Eligibility {
     pub retry: bool,
     pub adopt: bool,
@@ -65,7 +68,7 @@ pub struct Eligibility {
 /// Célula de Início sem início registrado.
 const NO_START: &str = "–";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Row {
     pub id: RowId,
     /// "#n" com um repo configurado; "repo#n" com mais de um.
@@ -86,14 +89,14 @@ pub struct Row {
     pub eligible: Eligibility,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Header {
     pub sync: String,
     pub stale: bool,
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct View {
     pub rows: Vec<Row>,
     pub pending: String,
@@ -149,6 +152,21 @@ pub fn reselect(prev_order: &[RowId], selected: Option<&RowId>, view: &View) -> 
         .or_else(|| prev_order[..idx].iter().rev().find(alive))
         .cloned()
         .or_else(first)
+}
+
+/// PRs cujo worktree sumiu do disco.
+pub fn missing_worktrees(state: &State) -> BTreeSet<PrKey> {
+    state.prs.values().filter(|r| !r.path.exists()).map(|r| r.key.clone()).collect()
+}
+
+impl ViewConfig {
+    pub fn of(cfg: &crate::config::Config) -> Self {
+        Self {
+            repos: cfg.repos.iter().map(|r| r.name.clone()).collect(),
+            poll_interval_secs: cfg.poll_interval_secs,
+            remove_grace: cfg.remove_grace(),
+        }
+    }
 }
 
 impl View {
@@ -368,7 +386,7 @@ fn header(state: &State, cfg: &ViewConfig, now: DateTime<Utc>) -> Header {
     }
 }
 
-/// Acima do pior tick do daemon (~105 s: contador até 90 s + `ensure` até 15 s).
+/// Acima do pior tick do daemon (~90 s do contador), com folga.
 const NO_REPLY_SECS: i64 = 150;
 
 fn request_line(state: &State, ui: &UiState, now: DateTime<Utc>) -> Option<String> {

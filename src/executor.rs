@@ -162,10 +162,10 @@ pub(crate) fn would_overwrite(err: &str) -> bool {
 }
 
 fn discard_worktree(ctx: &Ctx, repo: &Path, path: &Path, workspace: Option<String>) -> Result<()> {
-    match workspace {
-        Some(id) => ctx.herdr.remove_worktree(&id),
-        None => ctx.git().worktree_remove(repo, path),
+    if let Some(id) = workspace {
+        ctx.herdr.close_workspace(&id)?;
     }
+    ctx.git().worktree_remove(repo, path)
 }
 
 /// Apaga a branch do PR só se o daemon a criou, se ela ainda está no sha que ele
@@ -218,7 +218,7 @@ pub fn remove(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String
         state.push_alert(format!("{key}: {n}"));
     }
     if ctx.cfg.notify.on_removed {
-        let _ = ctx.herdr.notify(&format!("#{} removido", key.number), &rec.title, &ctx.cfg.notify.sound);
+        let _ = ctx.herdr.notify(&format!("#{} removido", key.number), &rec.title, &ctx.cfg.notify.sound, None);
     }
     Ok(note)
 }
@@ -683,12 +683,12 @@ mod tests {
 
     impl crate::runner::Runner for HerdrOnFake<'_> {
         fn run(&self, c: &crate::runner::Cmd) -> Result<crate::runner::Output> {
-            if c.program == "herdr" { self.herdr.run(c) } else { RealRunner.run(c) }
+            if c.program == "hc" || c.program == "herdr-app" { self.herdr.run(c) } else { RealRunner.run(c) }
         }
     }
 
     #[test]
-    fn remove_never_reopens_a_closed_workspace() {
+    fn remove_never_reopens_a_closed_space() {
         use crate::runner::{FakeRunner, Output};
         let fx = fixture(BRANCH);
         let cfg = config(&fx, "true");
@@ -699,16 +699,30 @@ mod tests {
         s.get_mut(&key).unwrap().phase = Phase::Removing;
 
         let herdr_runner = FakeRunner::new();
-        let list = format!(r#"{{"result":{{"worktrees":[{{"path":"{}","open_workspace_id":null}}]}}}}"#, path.display());
-        herdr_runner.on("worktree list", Output::ok(&list));
+        herdr_runner.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
         let runner = HerdrOnFake { herdr: &herdr_runner };
-        let cli = crate::herdr::HerdrCli::new(&runner, None);
-        let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &cli, now: Utc::now() };
+        let app = crate::herdr::HerdrApp::new(&runner, fx.root.join("notifications.jsonl"));
+        let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &app, now: Utc::now() };
         assert_eq!(remove(&ctx, &mut s, &key).unwrap(), None);
         assert!(!path.exists());
         assert!(s.get(&key).is_none());
         let lines = herdr_runner.lines();
-        assert!(lines.iter().all(|l| !l.contains("worktree open") && !l.contains("worktree remove")), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("hc run") && !l.contains("hc kill") && !l.contains("space.close")), "{lines:?}");
+    }
+
+    #[test]
+    fn remove_closes_the_open_space_before_removing_the_worktree() {
+        let fx = fixture(BRANCH);
+        let cfg = config(&fx, "true");
+        let herdr = FakeHerdr::new();
+        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let (mut s, key) = creating(&fx, &cfg);
+        let path = ready(&ctx, &mut s, &key);
+        let space = s.get(&key).unwrap().workspace_id.clone().unwrap();
+        s.get_mut(&key).unwrap().phase = Phase::Removing;
+        remove(&ctx, &mut s, &key).unwrap();
+        assert_eq!(*herdr.closed.borrow(), vec![space]);
+        assert!(!path.exists());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::runner::{Cmd, Output, Runner};
-use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -20,21 +20,7 @@ pub struct Created {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkspaceInfo {
-    pub id: String,
-    pub label: String,
-    /// Workspace focado no cliente (campo `focused` de `workspace list`).
-    pub focused: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaneInfo {
-    pub id: String,
-    pub is_reviewq_tui: bool,
-}
-
-/// Agente detectado pelo herdr (`herdr agent list`).
+/// Agente visto pelo herdr-core (`hc ls`), com o diretório onde ele roda.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentInfo {
     pub agent: String,
@@ -42,342 +28,263 @@ pub struct AgentInfo {
     pub foreground_cwd: Option<PathBuf>,
 }
 
-pub const PLUGIN_ID: &str = "cirdes.reviewq";
-/// Nome do binário cujo `tui` identifica o pane do painel.
-const TUI_BIN: &str = "herdr-reviewq";
-
-/// Como os comandos herdr da UI chegam ao servidor certo.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UiRouting {
-    pub bin: String,
-    pub session: Option<String>,
+/// Aviso para o mod do herdr-app mostrar como toast (o herdr-app não tem notificação por CLI).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Notice {
+    pub id: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub title: String,
+    pub body: String,
+    pub sound: String,
+    /// Space que o clique no toast mostra.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
-impl UiRouting {
-    /// Dentro de um pane/action do herdr (`HERDR_SOCKET_PATH` presente) o filho herda o socket,
-    /// então não passa `--session`; `HERDR_BIN_PATH` vira o programa.
-    pub fn resolve(get_env: impl Fn(&str) -> Option<String>, cfg_session: Option<String>) -> Self {
-        let bin = get_env("HERDR_BIN_PATH").filter(|b| !b.is_empty()).unwrap_or_else(|| "herdr".into());
-        let session = if get_env("HERDR_SOCKET_PATH").is_some() { None } else { cfg_session };
-        Self { bin, session }
-    }
-
-    pub fn from_process_env(cfg_session: Option<String>) -> Self {
-        Self::resolve(|k| std::env::var(k).ok(), cfg_session)
-    }
-}
+/// Quantos avisos o arquivo guarda; o mod só mostra os que ainda não viu.
+const OUTBOX_KEEP: usize = 50;
+/// Label que marca os terminais de um worktree do reviewq.
+const WORKTREE_LABEL: &str = "reviewq.worktree";
+/// Quanto esperar a janela do herdr-app adotar um space recém-criado.
+const ADOPT_WAIT: Duration = Duration::from_secs(3);
 
 pub trait Herdr {
+    /// Cria o worktree (`git worktree add`, sem `--force`) e abre um space para ele.
     fn create_worktree(&self, req: &CreateReq) -> Result<Created>;
-    /// Acha o workspace aberto para `path`; abre-o se o worktree existe mas está fechado.
-    fn find_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>>;
-    /// Só consulta: devolve o workspace aberto para `path`, sem nunca abrir um fechado.
+    /// Acha o space aberto para `path`; abre um, chamado `label`, se o worktree existe mas não há space.
+    fn find_workspace(&self, repo: &Path, path: &Path, label: &str) -> Result<Option<String>>;
+    /// Só consulta: devolve o space aberto para `path`, sem nunca abrir um.
     fn find_open_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>>;
-    fn remove_worktree(&self, workspace_id: &str) -> Result<()>;
-    fn notify(&self, title: &str, body: &str, sound: &str) -> Result<()>;
-    fn report_metadata(&self, workspace_id: &str, value: &str) -> Result<()>;
-    // Chamadas da UI: todas recebem o prazo total de quem chama. O prazo é checado antes de cada
-    // chamada ao herdr, e cada uma usa no máximo `min(timeout do cliente, o que resta)`.
-    fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>>;
-    /// Cria um workspace sem foco; devolve (workspace id, root pane).
-    fn create_workspace(&self, label: &str, cwd: &Path, deadline: Instant) -> Result<(String, Option<String>)>;
-    fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()>;
-    /// Panes do workspace com a identificação do TUI. Para de varrer (erro de prazo) quando `deadline` passa.
-    fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>>;
-    /// Abre o TUI do plugin ancorado em `target_pane` (que pertence a `workspace`).
-    /// Atenção: o herdr muda o foco para o workspace do pane, mesmo com `--no-focus`.
-    fn open_plugin_pane(&self, workspace: &str, target_pane: &str, deadline: Instant) -> Result<()>;
-    /// Agentes que o herdr reconhece na sessão (Claude, Codex…), com o diretório de cada um.
+    /// Fecha o space e encerra os terminais dele. Não mexe no worktree.
+    fn close_workspace(&self, workspace_id: &str) -> Result<()>;
+    fn notify(&self, title: &str, body: &str, sound: &str, space: Option<&str>) -> Result<()>;
+    /// Mostra o space na janela do herdr-app.
+    fn focus_workspace(&self, id: &str) -> Result<()>;
+    /// Agentes (Claude, Codex…) que o herdr-core vê, com o diretório de cada um.
     fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>>;
 }
 
-pub struct HerdrCli<'a> {
-    runner: &'a dyn Runner,
-    session: Option<String>,
-    bin: String,
-    timeout: Duration,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceList {
-    workspaces: Vec<WorkspaceEntry>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceEntry {
-    workspace_id: String,
-    #[serde(default)]
-    label: Option<String>,
-    focused: bool,
-}
-
-#[derive(Deserialize)]
-struct PaneList {
-    panes: Vec<PaneEntry>,
-}
-
-#[derive(Deserialize)]
-struct PaneEntry {
-    pane_id: String,
-    workspace_id: String,
-}
-
-#[derive(Deserialize)]
-struct ProcessInfoResult {
-    process_info: ProcessInfo,
-}
-
-#[derive(Deserialize)]
-struct ProcessInfo {
-    foreground_processes: Vec<ForegroundProcess>,
-}
-
-#[derive(Deserialize)]
-struct ForegroundProcess {
-    argv: Vec<String>,
-}
-
-/// O processo é o próprio binário `herdr-reviewq` (basename de argv[0]) rodando `tui` (argv[1]).
-/// Um shell que só menciona o comando (`sh -c "herdr-reviewq tui"`) ou outro programa que recebe
-/// esses nomes como argumentos não conta.
-fn is_tui_argv(argv: &[String]) -> bool {
-    match argv {
-        [program, sub, ..] => Path::new(program).file_name().and_then(|n| n.to_str()) == Some(TUI_BIN) && sub == "tui",
-        _ => false,
+/// Id do space de um worktree: estável para o mesmo caminho, então o daemon e a CLI acham
+/// o mesmo space sem guardar nada além do caminho.
+pub fn space_id(path: &Path) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in canon(path).to_string_lossy().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
     }
-}
-
-fn parse_as<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> Result<T> {
-    serde_json::from_value(v).with_context(|| format!("resposta inesperada do herdr em {what}"))
+    format!("rq-{h:016x}")
 }
 
 fn canon(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-pub fn parse_response(out: &Output) -> Result<Value> {
+fn json_of(out: &Output, what: &str) -> Result<Value> {
     let text = if out.stdout.trim().is_empty() { out.stderr.trim() } else { out.stdout.trim() };
-    let v: Value = serde_json::from_str(text).with_context(|| format!("resposta inválida do herdr: {text}"))?;
+    let v: Value = serde_json::from_str(text).with_context(|| format!("resposta inválida de {what}: {text}"))?;
     if let Some(err) = v.get("error") {
-        bail!(
-            "herdr: {} ({})",
-            err.get("message").and_then(Value::as_str).unwrap_or("erro"),
-            err.get("code").and_then(Value::as_str).unwrap_or("?")
-        );
+        bail!("{what}: {}", err.as_str().map(String::from).unwrap_or_else(|| err.to_string()));
     }
-    v.get("result").cloned().ok_or_else(|| anyhow!("resposta do herdr sem result"))
+    if !out.success() {
+        bail!("{what} falhou: {text}");
+    }
+    Ok(v)
 }
 
-impl<'a> HerdrCli<'a> {
-    pub fn new(runner: &'a dyn Runner, session: Option<String>) -> Self {
-        Self { runner, session, bin: "herdr".into(), timeout: Duration::from_secs(60) }
+/// Fala com o herdr-app (`herdr-app do`, só com a janela aberta) e com o herdr-core (`hc`,
+/// sempre disponível). Spaces nascem pelo core, com labels, para funcionar com a janela fechada.
+pub struct HerdrApp<'a> {
+    runner: &'a dyn Runner,
+    outbox: PathBuf,
+    timeout: Duration,
+}
+
+impl<'a> HerdrApp<'a> {
+    pub fn new(runner: &'a dyn Runner, outbox: PathBuf) -> Self {
+        Self { runner, outbox, timeout: Duration::from_secs(30) }
     }
 
-    /// Cliente da UI: programa e sessão vêm do `UiRouting`.
-    pub fn routed(runner: &'a dyn Runner, routing: &UiRouting) -> Self {
-        Self { runner, session: routing.session.clone(), bin: routing.bin.clone(), timeout: Duration::from_secs(60) }
-    }
-
-    /// Timeout por chamada (padrão 60 s; comandos longos do núcleo têm o seu próprio).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    fn cmd(&self) -> Cmd {
-        let c = Cmd::new(&self.bin).timeout(self.timeout);
-        match &self.session {
-            Some(s) => c.arg("--session").arg(s.clone()),
-            None => c,
-        }
+    fn hc(&self) -> Cmd {
+        Cmd::new("hc").timeout(self.timeout)
     }
 
-    fn call(&self, cmd: Cmd) -> Result<Value> {
-        parse_response(&self.runner.run(&cmd)?)
+    fn app(&self, command: &str, args: Value) -> Result<Value> {
+        let cmd = Cmd::new("herdr-app").args(["do", command]).arg(args.to_string()).timeout(self.timeout);
+        json_of(&self.runner.run(&cmd)?, &format!("herdr-app {command}"))
     }
 
-    /// Entrada de `worktree list` para `path`, se o herdr conhece o worktree.
-    fn list_entry(&self, repo: &Path, path: &Path) -> Result<Option<Value>> {
-        let res = self.call(self.cmd().args(["worktree", "list", "--cwd"]).arg(repo.to_string_lossy()))?;
-        let want = canon(path);
-        Ok(res
-            .get("worktrees")
+    /// Endereços dos terminais vivos do space.
+    fn space_terminals(&self, id: &str, timeout: Duration) -> Result<Vec<String>> {
+        let cmd = self.hc().args(["ls", "--json", "--label"]).arg(format!("herdr.space={id}")).timeout(timeout);
+        let ls = json_of(&self.runner.run(&cmd)?, "hc ls")?;
+        Ok(ls
+            .get("terminals")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .find(|w| w.get("path").and_then(Value::as_str).map(|p| canon(Path::new(p)) == want).unwrap_or(false))
-            .cloned())
+            .filter(|t| t.get("state").and_then(Value::as_str) == Some("live"))
+            .filter_map(|t| t.get("address").and_then(Value::as_str).map(String::from))
+            .collect())
     }
 
-    /// Timeout de uma chamada limitada por `deadline`; erro se o prazo já passou.
-    fn until(&self, deadline: Instant) -> Result<Duration> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            bail!("prazo esgotado esperando o herdr");
+    /// Abre um shell no worktree num space novo. O nome é cosmético: com a janela fechada o
+    /// space fica com o nome da pasta até ser renomeado.
+    fn open_space(&self, path: &Path, label: &str) -> Result<String> {
+        let id = space_id(path);
+        let cmd = self
+            .hc()
+            .args(["run", "--bg", "--keep", "--no-parent", "--json", "--cwd"])
+            .arg(path.to_string_lossy())
+            .arg("--label")
+            .arg(format!("herdr.space={id}"))
+            .arg("--label")
+            .arg(format!("{WORKTREE_LABEL}={}", canon(path).display()));
+        json_of(&self.runner.run(&cmd)?, "hc run")?;
+        if self.wait_in_window(&id) {
+            let _ = self.app("space.rename", serde_json::json!({ "id": id, "name": label }));
         }
-        Ok(left.min(self.timeout))
+        Ok(id)
     }
 
-    fn exec(&self, cmd: Cmd) -> Result<()> {
-        let out = self.runner.run(&cmd)?;
-        if !out.success() {
-            bail!("{} falhou: {} {}", cmd.line(), out.stderr.trim(), out.stdout.trim());
+    /// O herdr-app adota o terminal um instante depois do `hc run`; renomear ou mostrar o space
+    /// antes disso falha com "no such space". Espera até `ADOPT_WAIT`; com a janela fechada,
+    /// desiste na hora (o space aparece quando ela abrir).
+    fn wait_in_window(&self, id: &str) -> bool {
+        let until = Instant::now() + ADOPT_WAIT;
+        loop {
+            let Ok(out) = self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.timeout)) else { return false };
+            let Ok(ls) = json_of(&out, "herdr-app ls") else { return false };
+            let spaces = ls.get("spaces").and_then(Value::as_array).into_iter().flatten();
+            if spaces.filter_map(|s| s.get("id").and_then(Value::as_str)).any(|s| s == id) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    fn append_notice(&self, notice: &Notice) -> Result<()> {
+        let mut lines: Vec<String> = match std::fs::read_to_string(&self.outbox) {
+            Ok(t) => t.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+            Err(e) => return Err(e.into()),
+        };
+        lines.push(serde_json::to_string(notice)?);
+        let skip = lines.len().saturating_sub(OUTBOX_KEEP);
+        if let Some(dir) = self.outbox.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = self.outbox.with_extension("tmp");
+        std::fs::write(&tmp, lines[skip..].join("\n") + "\n")?;
+        std::fs::rename(&tmp, &self.outbox)?;
         Ok(())
     }
 }
 
-impl Herdr for HerdrCli<'_> {
+impl Herdr for HerdrApp<'_> {
     fn create_worktree(&self, r: &CreateReq) -> Result<Created> {
-        let res = self.call(
-            self.cmd()
-                .args(["worktree", "create", "--cwd"])
-                .arg(r.repo.to_string_lossy())
-                .arg("--branch")
-                .arg(r.branch.clone())
-                .arg("--base")
-                .arg(r.base.clone())
-                .arg("--path")
-                .arg(r.path.to_string_lossy())
-                .arg("--label")
-                .arg(r.label.clone())
-                .args(["--no-focus", "--trust-repository"])
-                .timeout(Duration::from_secs(300)),
-        )?;
-        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("worktree_created sem workspace_id")?;
-        let path = res.pointer("/worktree/path").and_then(Value::as_str).context("worktree_created sem path")?;
-        Ok(Created { workspace_id: ws.into(), path: path.into() })
-    }
-
-    fn find_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>> {
-        let Some(entry) = self.list_entry(repo, path)? else { return Ok(None) };
-        if let Some(id) = entry.get("open_workspace_id").and_then(Value::as_str) {
-            return Ok(Some(id.into()));
+        let cmd = Cmd::new("git")
+            .cwd(r.repo.clone())
+            .args(["worktree", "add", "-q", "-b"])
+            .arg(r.branch.clone())
+            .arg(r.path.to_string_lossy())
+            .arg(r.base.clone())
+            .timeout(Duration::from_secs(300));
+        let out = self.runner.run(&cmd)?;
+        if !out.success() {
+            bail!("git worktree add falhou: {}", out.stderr.trim());
         }
-        let opened = self.call(
-            self.cmd()
-                .args(["worktree", "open", "--cwd"])
-                .arg(repo.to_string_lossy())
-                .arg("--path")
-                .arg(path.to_string_lossy())
-                .arg("--no-focus"),
-        )?;
-        Ok(opened.pointer("/workspace/workspace_id").and_then(Value::as_str).map(String::from))
+        let id = self.open_space(&r.path, &r.label)?;
+        Ok(Created { workspace_id: id, path: r.path.clone() })
     }
 
-    fn find_open_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>> {
-        Ok(self
-            .list_entry(repo, path)?
-            .and_then(|e| e.get("open_workspace_id").and_then(Value::as_str).map(String::from)))
-    }
-
-    fn remove_worktree(&self, workspace_id: &str) -> Result<()> {
-        self.call(self.cmd().args(["worktree", "remove", "--workspace", workspace_id]).timeout(Duration::from_secs(300)))
-            .map(|_| ())
-    }
-
-    fn notify(&self, title: &str, body: &str, sound: &str) -> Result<()> {
-        self.exec(self.cmd().args(["notification", "show", title, "--body", body, "--sound", sound]))
-    }
-
-    fn report_metadata(&self, workspace_id: &str, value: &str) -> Result<()> {
-        // o spike mostrou que o id do workspace tem de vir antes das opções
-        self.exec(
-            self.cmd()
-                .args(["workspace", "report-metadata", workspace_id, "--source", "reviewq", "--token"])
-                .arg(format!("reviewq={value}")),
-        )
-    }
-
-    fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>> {
-        let cmd = self.cmd().args(["workspace", "list"]).timeout(self.until(deadline)?);
-        let list: WorkspaceList = parse_as(self.call(cmd)?, "workspace list")?;
-        Ok(list
-            .workspaces
-            .into_iter()
-            .map(|w| WorkspaceInfo { id: w.workspace_id, label: w.label.unwrap_or_default(), focused: w.focused })
-            .collect())
-    }
-
-    fn create_workspace(&self, label: &str, cwd: &Path, deadline: Instant) -> Result<(String, Option<String>)> {
-        let res = self.call(
-            self.cmd()
-                .args(["workspace", "create", "--label", label, "--no-focus", "--cwd"])
-                .arg(cwd.to_string_lossy())
-                .timeout(self.until(deadline)?),
-        )?;
-        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("workspace create sem workspace_id")?;
-        let root = res.pointer("/root_pane/pane_id").and_then(Value::as_str).map(String::from);
-        Ok((ws.into(), root))
-    }
-
-    fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()> {
-        self.call(self.cmd().args(["workspace", "focus", id]).timeout(self.until(deadline)?)).map(|_| ())
-    }
-
-    fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>> {
-        let list: PaneList = parse_as(
-            self.call(self.cmd().args(["pane", "list", "--workspace", workspace]).timeout(self.until(deadline)?))?,
-            "pane list",
-        )?;
-        let mut out = vec![];
-        for p in list.panes.into_iter().filter(|p| p.workspace_id == workspace) {
-            let cmd = self.cmd().args(["pane", "process-info", "--pane", &p.pane_id]).timeout(self.until(deadline)?);
-            let info: ProcessInfoResult = parse_as(self.call(cmd)?, "pane process-info")?;
-            let is_tui = info.process_info.foreground_processes.iter().any(|fp| is_tui_argv(&fp.argv));
-            out.push(PaneInfo { id: p.pane_id, is_reviewq_tui: is_tui });
+    fn find_workspace(&self, repo: &Path, path: &Path, label: &str) -> Result<Option<String>> {
+        if let Some(id) = self.find_open_workspace(repo, path)? {
+            return Ok(Some(id));
         }
-        Ok(out)
+        if !path.exists() {
+            return Ok(None);
+        }
+        self.open_space(path, label).map(Some)
     }
 
-    fn open_plugin_pane(&self, _workspace: &str, target_pane: &str, deadline: Instant) -> Result<()> {
-        // spike: `--target-pane` é obrigatório e não pode vir com `--workspace`
-        self.call(
-            self.cmd()
-                .args([
-                    "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "tui", "--target-pane", target_pane,
-                    "--placement", "zoomed",
-                ])
-                .timeout(self.until(deadline)?),
-        )
-        .map(|_| ())
+    fn find_open_workspace(&self, _repo: &Path, path: &Path) -> Result<Option<String>> {
+        let id = space_id(path);
+        Ok((!self.space_terminals(&id, self.timeout)?.is_empty()).then_some(id))
+    }
+
+    fn close_workspace(&self, id: &str) -> Result<()> {
+        let _ = self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }));
+        for t in self.space_terminals(id, self.timeout)? {
+            let out = self.runner.run(&self.hc().args(["kill", &t]))?;
+            if !out.success() {
+                bail!("hc kill {t} falhou: {}", out.stderr.trim());
+            }
+        }
+        Ok(())
+    }
+
+    fn notify(&self, title: &str, body: &str, sound: &str, space: Option<&str>) -> Result<()> {
+        self.append_notice(&Notice {
+            id: uuid::Uuid::new_v4().to_string(),
+            at: chrono::Utc::now(),
+            title: title.into(),
+            body: body.into(),
+            sound: sound.into(),
+            space: space.map(String::from),
+        })
+    }
+
+    fn focus_workspace(&self, id: &str) -> Result<()> {
+        self.app("space.select", serde_json::json!({ "id": id })).map(|_| ())
     }
 
     fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>> {
-        let res = self.call(self.cmd().args(["agent", "list"]).timeout(self.until(deadline)?))?;
-        Ok(crate::agents::parse_agents(&res))
+        let until = |deadline: Instant| -> Result<Duration> {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                bail!("prazo esgotado esperando o herdr-core");
+            }
+            Ok(left.min(self.timeout))
+        };
+        let ls = json_of(&self.runner.run(&self.hc().args(["ls", "--json"]).timeout(until(deadline)?))?, "hc ls")?;
+        let mut out = vec![];
+        for (address, mut agent) in crate::agents::parse_agents(&ls) {
+            if !crate::agents::is_known(&agent.agent) {
+                continue;
+            }
+            let get = self.hc().args(["get", &address, "--json"]).timeout(until(deadline)?);
+            if let Ok(v) = json_of(&self.runner.run(&get)?, "hc get") {
+                agent.foreground_cwd = crate::agents::foreground_cwd(&v);
+            }
+            out.push(agent);
+        }
+        Ok(out)
     }
 }
 
-/// Dublê para testes: cria/remove worktrees com git de verdade, sem `--force`.
+/// Dublê para testes: cria worktrees com git de verdade, sem `--force`.
 #[cfg(test)]
 pub struct FakeHerdr {
     pub open: std::cell::RefCell<std::collections::BTreeMap<String, (PathBuf, PathBuf)>>,
     pub notifications: std::cell::RefCell<Vec<String>>,
-    pub metadata: std::cell::RefCell<Vec<(String, String)>>,
-    /// Quando true, `notify` falha (simula herdr fora do ar).
+    /// Space de cada aviso, na ordem.
+    pub notified_spaces: std::cell::RefCell<Vec<Option<String>>>,
+    /// Quando true, `notify` falha.
     pub fail_notify: std::cell::Cell<bool>,
-    pub workspaces: std::cell::RefCell<Vec<WorkspaceInfo>>,
-    pub panes: std::cell::RefCell<std::collections::BTreeMap<String, Vec<PaneInfo>>>,
-    /// Workspace focado; `list_workspaces` deriva `focused` daqui.
-    pub focused: std::cell::RefCell<Option<String>>,
     /// Ids passados a `focus_workspace`, em ordem.
     pub focus_calls: std::cell::RefCell<Vec<String>>,
-    /// `cwd` de cada `create_workspace`.
-    pub created_cwds: std::cell::RefCell<Vec<PathBuf>>,
-    /// (workspace, target_pane) de cada `open_plugin_pane`.
-    pub opened_on: std::cell::RefCell<Vec<(String, String)>>,
-    /// Todas as chamadas de workspace/pane falham.
-    pub fail_herdr: std::cell::Cell<bool>,
-    pub fail_list_workspaces: std::cell::Cell<bool>,
-    pub fail_list_panes: std::cell::Cell<bool>,
-    pub fail_open_pane: std::cell::Cell<bool>,
-    /// `open_plugin_pane` cria um pane cujo TUI não está vivo.
-    pub tui_starts_dead: std::cell::Cell<bool>,
-    /// Como o herdr real (spike): abrir o pane do plugin rouba o foco. Padrão true.
-    pub open_steals_focus: std::cell::Cell<bool>,
-    /// Demora de cada `process-info` simulado em `list_panes`.
-    pub pane_scan_delay: std::cell::Cell<Duration>,
+    /// Ids passados a `close_workspace`, em ordem.
+    pub closed: std::cell::RefCell<Vec<String>>,
+    /// `focus_workspace` falha (janela do herdr-app fechada).
+    pub fail_focus: std::cell::Cell<bool>,
     /// Resposta de `list_agents`.
     pub agents: std::cell::RefCell<Vec<AgentInfo>>,
     pub fail_agents: std::cell::Cell<bool>,
@@ -397,40 +304,15 @@ impl FakeHerdr {
         Self {
             open: Default::default(),
             notifications: Default::default(),
-            metadata: Default::default(),
+            notified_spaces: Default::default(),
             fail_notify: std::cell::Cell::new(false),
-            workspaces: Default::default(),
-            panes: Default::default(),
-            focused: Default::default(),
             focus_calls: Default::default(),
-            created_cwds: Default::default(),
-            opened_on: Default::default(),
-            fail_herdr: Default::default(),
-            fail_list_workspaces: Default::default(),
-            fail_list_panes: Default::default(),
-            fail_open_pane: Default::default(),
-            tui_starts_dead: Default::default(),
-            open_steals_focus: std::cell::Cell::new(true),
-            pane_scan_delay: Default::default(),
+            closed: Default::default(),
+            fail_focus: Default::default(),
             agents: Default::default(),
             fail_agents: Default::default(),
             next: std::cell::Cell::new(1),
         }
-    }
-
-    /// Como o `HerdrCli`: prazo vencido, nenhuma chamada.
-    fn before(deadline: Instant) -> Result<()> {
-        if Instant::now() >= deadline {
-            bail!("prazo esgotado esperando o herdr");
-        }
-        Ok(())
-    }
-
-    fn check(&self, what: &str, fail: bool) -> Result<()> {
-        if self.fail_herdr.get() || fail {
-            bail!("herdr {what} falhou (teste)");
-        }
-        Ok(())
     }
 
     fn git(dir: &Path, args: &[&str]) -> Result<()> {
@@ -440,108 +322,64 @@ impl FakeHerdr {
         }
         Ok(())
     }
+
+    fn open_space(&self, repo: &Path, path: &Path) -> String {
+        let id = format!("w{}", self.next.get());
+        self.next.set(self.next.get() + 1);
+        self.open.borrow_mut().insert(id.clone(), (repo.to_path_buf(), path.to_path_buf()));
+        id
+    }
 }
 
 #[cfg(test)]
 impl Herdr for FakeHerdr {
     fn create_worktree(&self, r: &CreateReq) -> Result<Created> {
         Self::git(&r.repo, &["worktree", "add", "-q", "-b", &r.branch, &r.path.to_string_lossy(), &r.base])?;
-        let id = format!("w{}", self.next.get());
-        self.next.set(self.next.get() + 1);
-        self.open.borrow_mut().insert(id.clone(), (r.repo.clone(), r.path.clone()));
-        Ok(Created { workspace_id: id, path: r.path.clone() })
+        Ok(Created { workspace_id: self.open_space(&r.repo, &r.path), path: r.path.clone() })
     }
 
-    fn find_workspace(&self, _repo: &Path, path: &Path) -> Result<Option<String>> {
+    fn find_workspace(&self, repo: &Path, path: &Path, _label: &str) -> Result<Option<String>> {
+        if let Some(id) = self.find_open_workspace(repo, path)? {
+            return Ok(Some(id));
+        }
+        Ok(path.exists().then(|| self.open_space(repo, path)))
+    }
+
+    fn find_open_workspace(&self, _repo: &Path, path: &Path) -> Result<Option<String>> {
         let want = canon(path);
         Ok(self.open.borrow().iter().find(|(_, (_, p))| canon(p) == want).map(|(id, _)| id.clone()))
     }
 
-    fn find_open_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>> {
-        self.find_workspace(repo, path)
-    }
-
-    fn remove_worktree(&self, id: &str) -> Result<()> {
-        let (repo, path) = self.open.borrow().get(id).cloned().context("workspace desconhecido")?;
-        Self::git(&repo, &["worktree", "remove", &path.to_string_lossy()])?;
-        self.open.borrow_mut().remove(id);
+    fn close_workspace(&self, id: &str) -> Result<()> {
+        self.open.borrow_mut().remove(id).context("space desconhecido")?;
+        self.closed.borrow_mut().push(id.into());
         Ok(())
     }
 
-    fn notify(&self, title: &str, body: &str, _sound: &str) -> Result<()> {
+    fn notify(&self, title: &str, body: &str, _sound: &str, space: Option<&str>) -> Result<()> {
         if self.fail_notify.get() {
-            bail!("herdr fora do ar (teste)");
+            bail!("aviso falhou (teste)");
         }
         self.notifications.borrow_mut().push(format!("{title} | {body}"));
+        self.notified_spaces.borrow_mut().push(space.map(String::from));
         Ok(())
     }
 
-    fn report_metadata(&self, workspace_id: &str, value: &str) -> Result<()> {
-        self.metadata.borrow_mut().push((workspace_id.into(), value.into()));
-        Ok(())
-    }
-
-    fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>> {
-        Self::before(deadline)?;
-        self.check("workspace list", self.fail_list_workspaces.get())?;
-        let focused = self.focused.borrow().clone();
-        Ok(self
-            .workspaces
-            .borrow()
-            .iter()
-            .map(|w| WorkspaceInfo { focused: focused.as_deref() == Some(w.id.as_str()), ..w.clone() })
-            .collect())
-    }
-
-    fn create_workspace(&self, label: &str, cwd: &Path, deadline: Instant) -> Result<(String, Option<String>)> {
-        Self::before(deadline)?;
-        self.check("workspace create", false)?;
-        let id = format!("ws{}", self.next.get());
-        self.next.set(self.next.get() + 1);
-        let root = format!("{id}:p1");
-        self.workspaces.borrow_mut().push(WorkspaceInfo { id: id.clone(), label: label.into(), focused: false });
-        self.panes.borrow_mut().insert(id.clone(), vec![PaneInfo { id: root.clone(), is_reviewq_tui: false }]);
-        self.created_cwds.borrow_mut().push(cwd.to_path_buf());
-        Ok((id, Some(root)))
-    }
-
-    fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()> {
-        Self::before(deadline)?;
-        self.check("workspace focus", false)?;
+    fn focus_workspace(&self, id: &str) -> Result<()> {
+        if self.fail_focus.get() {
+            bail!("herdr-app space.select: janela fechada (teste)");
+        }
         self.focus_calls.borrow_mut().push(id.into());
-        *self.focused.borrow_mut() = Some(id.into());
-        Ok(())
-    }
-
-    fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>> {
-        self.check("pane list", self.fail_list_panes.get())?;
-        let panes = self.panes.borrow().get(workspace).cloned().unwrap_or_default();
-        // como o HerdrCli: prazo checado antes de cada `process-info`, que demora `pane_scan_delay`
-        for _ in &panes {
-            Self::before(deadline)?;
-            std::thread::sleep(self.pane_scan_delay.get());
-        }
-        Ok(panes)
-    }
-
-    fn open_plugin_pane(&self, workspace: &str, target_pane: &str, deadline: Instant) -> Result<()> {
-        Self::before(deadline)?;
-        self.check("plugin pane open", self.fail_open_pane.get())?;
-        self.opened_on.borrow_mut().push((workspace.into(), target_pane.into()));
-        self.panes
-            .borrow_mut()
-            .entry(workspace.into())
-            .or_default()
-            .push(PaneInfo { id: format!("{workspace}:tui"), is_reviewq_tui: !self.tui_starts_dead.get() });
-        if self.open_steals_focus.get() {
-            *self.focused.borrow_mut() = Some(workspace.into());
-        }
         Ok(())
     }
 
     fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>> {
-        Self::before(deadline)?;
-        self.check("agent list", self.fail_agents.get())?;
+        if Instant::now() >= deadline {
+            bail!("prazo esgotado esperando o herdr-core");
+        }
+        if self.fail_agents.get() {
+            bail!("hc ls falhou (teste)");
+        }
         Ok(self.agents.borrow().clone())
     }
 }
@@ -549,264 +387,199 @@ impl Herdr for FakeHerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{FakeRunner, Output};
+    use crate::runner::FakeRunner;
 
-    fn far() -> std::time::Instant {
-        std::time::Instant::now() + Duration::from_secs(60)
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
     }
 
-    const CREATED: &str = r#"{"id":"cli:worktree:create","result":{"type":"worktree_created",
-        "workspace":{"workspace_id":"w7"},"tab":{},"root_pane":{},
-        "worktree":{"path":"/w/o/r/pr-7","is_bare":false,"is_detached":false,"is_prunable":false,"is_linked_worktree":true,"label":"x"}}}"#;
+    fn app<'a>(fake: &'a FakeRunner, dir: &Path) -> HerdrApp<'a> {
+        HerdrApp::new(fake, dir.join("notifications.jsonl"))
+    }
+
+    fn listed(ids: &[&str]) -> String {
+        serde_json::json!({ "spaces": ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>() }).to_string()
+    }
 
     #[test]
-    fn create_parses_ids_and_passes_label_as_single_arg() {
+    fn space_id_is_stable_per_path_and_distinct_between_paths() {
+        assert_eq!(space_id(Path::new("/w/o/r/pr-7")), space_id(Path::new("/w/o/r/pr-7")));
+        assert_ne!(space_id(Path::new("/w/o/r/pr-7")), space_id(Path::new("/w/o/r/pr-70")));
+        assert!(space_id(Path::new("/w/o/r/pr-7")).starts_with("rq-"));
+    }
+
+    #[test]
+    fn create_adds_worktree_without_force_then_opens_labeled_space_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
         let fake = FakeRunner::new();
-        fake.on("worktree create", Output::ok(CREATED));
-        let h = HerdrCli::new(&fake, None);
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9","state":"live"}"#));
+        fake.on("herdr-app ls", Output::ok(&listed(&[&space_id(Path::new("/w/o/r/pr-7"))])));
+        fake.on("space.rename", Output::ok(r#"{"ok":true}"#));
         let label = "#7 Ajusta \"webhook\" de fornecedores — ação";
-        let created = h
+        let created = app(&fake, dir.path())
             .create_worktree(&CreateReq {
                 repo: "/r".into(), branch: "feat/x".into(), base: "origin/feat/x".into(),
                 path: "/w/o/r/pr-7".into(), label: label.into(),
             })
             .unwrap();
-        assert_eq!(created.workspace_id, "w7");
-        let call = fake.calls.borrow()[0].clone();
-        let i = call.args.iter().position(|a| a == "--label").unwrap();
-        assert_eq!(call.args[i + 1], label);
-        assert!(call.args.contains(&"--no-focus".to_string()));
-        assert!(!call.args.iter().any(|a| a == "--force"));
-    }
-
-    #[test]
-    fn session_flag_comes_before_subcommand() {
-        let fake = FakeRunner::new();
-        fake.on("worktree list", Output::ok(r#"{"result":{"type":"worktree_list","source":{},"worktrees":[]}}"#));
-        HerdrCli::new(&fake, Some("main".into())).find_workspace(Path::new("/r"), Path::new("/w/x")).unwrap();
-        assert!(fake.lines()[0].starts_with("herdr --session main worktree list"));
-    }
-
-    #[test]
-    fn error_response_becomes_err_even_on_stderr() {
-        let out = Output { status: Some(1), stderr: r#"{"error":{"code":"not_git_worktree","message":"sem repo"}}"#.into(), ..Default::default() };
-        let err = parse_response(&out).unwrap_err().to_string();
-        assert!(err.contains("sem repo") && err.contains("not_git_worktree"));
-    }
-
-    #[test]
-    fn find_workspace_open_closed_and_absent() {
-        let fake = FakeRunner::new();
-        fake.on("worktree list", Output::ok(r#"{"result":{"worktrees":[{"path":"/w/a","open_workspace_id":"w1"},{"path":"/w/b","open_workspace_id":null}]}}"#));
-        fake.on("worktree list", Output::ok(r#"{"result":{"worktrees":[{"path":"/w/a","open_workspace_id":"w1"},{"path":"/w/b","open_workspace_id":null}]}}"#));
-        fake.on("worktree open", Output::ok(r#"{"result":{"type":"worktree_opened","workspace":{"workspace_id":"w2"}}}"#));
-        fake.on("worktree list", Output::ok(r#"{"result":{"worktrees":[]}}"#));
-        let h = HerdrCli::new(&fake, None);
-        assert_eq!(h.find_workspace(Path::new("/r"), Path::new("/w/a")).unwrap().as_deref(), Some("w1"));
-        assert_eq!(h.find_workspace(Path::new("/r"), Path::new("/w/b")).unwrap().as_deref(), Some("w2"));
-        assert_eq!(h.find_workspace(Path::new("/r"), Path::new("/w/c")).unwrap(), None);
-    }
-
-    #[test]
-    fn find_open_workspace_never_opens_a_closed_one() {
-        let fake = FakeRunner::new();
-        let list = r#"{"result":{"worktrees":[{"path":"/w/a","open_workspace_id":"w1"},{"path":"/w/b","open_workspace_id":null}]}}"#;
-        for _ in 0..3 {
-            fake.on("worktree list", Output::ok(list));
-        }
-        let h = HerdrCli::new(&fake, None);
-        assert_eq!(h.find_open_workspace(Path::new("/r"), Path::new("/w/a")).unwrap().as_deref(), Some("w1"));
-        assert_eq!(h.find_open_workspace(Path::new("/r"), Path::new("/w/b")).unwrap(), None);
-        assert_eq!(h.find_open_workspace(Path::new("/r"), Path::new("/w/c")).unwrap(), None);
-        assert!(fake.lines().iter().all(|l| !l.contains("worktree open")), "{:?}", fake.lines());
-    }
-
-    #[test]
-    fn notify_checks_exit_code_only() {
-        let fake = FakeRunner::new();
-        fake.on("notification show", Output::ok(""));
-        fake.on("notification show", Output::fail(1, "sem servidor"));
-        let h = HerdrCli::new(&fake, None);
-        h.notify("t", "b", "request").unwrap();
-        assert!(h.notify("t", "b", "request").is_err());
-        assert!(fake.lines()[0].contains("--sound request"));
-    }
-
-    fn proc_info(argvs: &[&[&str]]) -> String {
-        let procs: Vec<Value> = argvs
-            .iter()
-            .enumerate()
-            .map(|(i, a)| serde_json::json!({"pid": i + 10, "name": a[0], "argv": a, "argv0": a[0], "cmdline": a.join(" "), "cwd": "/"}))
-            .collect();
-        serde_json::json!({"result":{"type":"pane_process_info","process_info":{"pane_id":"x","shell_pid":1,"foreground_process_group_id":1,"foreground_processes":procs}}}).to_string()
-    }
-
-    #[test]
-    fn workspaces_and_plugin_pane_commands() {
-        let fake = FakeRunner::new();
-        fake.on("workspace list", Output::ok(r#"{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"~","focused":true,"number":1},{"workspace_id":"w9","label":"reviewq","focused":false,"number":2}]}}"#));
-        fake.on("workspace create", Output::ok(r#"{"result":{"workspace":{"workspace_id":"w10"},"tab":{},"root_pane":{"pane_id":"w10:p1"}}}"#));
-        fake.on("plugin pane open", Output::ok(r#"{"result":{"plugin_pane":{"pane":{"pane_id":"w10:p2"}}}}"#));
-        fake.on("workspace focus", Output::ok(r#"{"result":{}}"#));
-        let h = HerdrCli::new(&fake, None);
-        let ws = h.list_workspaces(far()).unwrap();
-        assert_eq!(ws[0], WorkspaceInfo { id: "w1".into(), label: "~".into(), focused: true });
-        assert_eq!(ws[1], WorkspaceInfo { id: "w9".into(), label: "reviewq".into(), focused: false });
-        assert_eq!(h.create_workspace("reviewq", Path::new("/Users/c"), far()).unwrap(), ("w10".into(), Some("w10:p1".into())));
-        h.open_plugin_pane("w10", "w10:p1", far()).unwrap();
-        h.focus_workspace("w10", far()).unwrap();
-        let lines = fake.lines();
-        assert!(lines[1].contains("--label reviewq") && lines[1].contains("--no-focus") && lines[1].contains("--cwd /Users/c"), "{}", lines[1]);
-        let open = fake.calls.borrow()[2].clone();
-        let pair = |flag: &str| open.args.iter().position(|a| a == flag).map(|i| open.args[i + 1].clone());
-        assert_eq!(pair("--plugin").as_deref(), Some(PLUGIN_ID));
-        assert_eq!(pair("--entrypoint").as_deref(), Some("tui"));
-        assert_eq!(pair("--target-pane").as_deref(), Some("w10:p1"));
-        assert_eq!(pair("--placement").as_deref(), Some("zoomed"));
-        assert!(!open.args.iter().any(|a| a == "--workspace"), "spike: --workspace com --target-pane é erro");
-        assert_eq!(lines[3], "herdr workspace focus w10");
-    }
-
-    #[test]
-    fn list_workspaces_rejects_incomplete_entries() {
-        for bad in [
-            r#"{"result":{"workspaces":[{"label":"x","focused":false}]}}"#,
-            r#"{"result":{"workspaces":[{"workspace_id":"w1","label":"x"}]}}"#,
-            r#"{"result":{"workspaces":[{"workspace_id":7,"label":"x","focused":false}]}}"#,
-            r#"{"result":{}}"#,
-        ] {
-            let fake = FakeRunner::new();
-            fake.on("workspace list", Output::ok(bad));
-            assert!(HerdrCli::new(&fake, None).list_workspaces(far()).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn list_panes_identifies_tui_by_live_process_argv() {
-        let fake = FakeRunner::new();
-        fake.on("pane list", Output::ok(r#"{"result":{"type":"pane_list","panes":[
-            {"pane_id":"w5:p1","workspace_id":"w5","focused":false},
-            {"pane_id":"w5:p2","workspace_id":"w5","label":"reviewq","focused":true},
-            {"pane_id":"w5:p3","workspace_id":"w5","label":"reviewq","focused":false},
-            {"pane_id":"w5:p4","workspace_id":"w5","label":"reviewq","focused":false}]}}"#));
-        // shell comum
-        fake.on("process-info --pane w5:p1", Output::ok(&proc_info(&[&["-zsh"]])));
-        // sh -c ainda vivo + o binário de verdade como filho
-        fake.on(
-            "process-info --pane w5:p2",
-            Output::ok(&proc_info(&[&["sh", "-c", "exec herdr-reviewq tui"], &["/Users/c/.cargo/bin/herdr-reviewq", "tui"]])),
-        );
-        // shell que só menciona o comando (o TUI não está rodando)
-        fake.on("process-info --pane w5:p3", Output::ok(&proc_info(&[&["bash", "-c", "herdr-reviewq tui"], &["vim", "herdr-reviewq", "tui"]])));
-        // pane do plugin sem processo vivo
-        fake.on("process-info --pane w5:p4", Output::ok(&proc_info(&[])));
-        let panes = HerdrCli::new(&fake, None).list_panes("w5", far()).unwrap();
-        let got: Vec<(&str, bool)> = panes.iter().map(|p| (p.id.as_str(), p.is_reviewq_tui)).collect();
-        assert_eq!(got, vec![("w5:p1", false), ("w5:p2", true), ("w5:p3", false), ("w5:p4", false)]);
-        assert!(fake.lines()[0].contains("pane list --workspace w5"), "{}", fake.lines()[0]);
-    }
-
-    #[test]
-    fn list_panes_rejects_incomplete_json() {
-        let fake = FakeRunner::new();
-        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"workspace_id":"w5"}]}}"#));
-        assert!(HerdrCli::new(&fake, None).list_panes("w5", far()).is_err());
-
-        let fake = FakeRunner::new();
-        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
-        fake.on("process-info", Output::ok(r#"{"result":{"process_info":{"pane_id":"w5:p1"}}}"#));
-        assert!(HerdrCli::new(&fake, None).list_panes("w5", far()).is_err());
-
-        let fake = FakeRunner::new();
-        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
-        fake.on("process-info", Output::ok(r#"{"result":{"process_info":{"foreground_processes":[{"pid":1,"name":"x"}]}}}"#));
-        assert!(HerdrCli::new(&fake, None).list_panes("w5", far()).is_err());
-
-        let fake = FakeRunner::new();
-        fake.on("workspace create", Output::ok(r#"{"result":{"workspace":{},"root_pane":{"pane_id":"w1:p1"}}}"#));
-        assert!(HerdrCli::new(&fake, None).create_workspace("reviewq", Path::new("/h"), far()).is_err());
-    }
-
-    /// Responde `pane list` com 5 panes e demora `delay` em cada `process-info`.
-    struct SlowPanes {
-        delay: Duration,
-        calls: std::cell::RefCell<Vec<Cmd>>,
-    }
-
-    impl Runner for SlowPanes {
-        fn run(&self, cmd: &Cmd) -> Result<Output> {
-            self.calls.borrow_mut().push(cmd.clone());
-            let line = cmd.line();
-            if line.contains("pane list") {
-                let panes: Vec<Value> = (1..=5).map(|i| serde_json::json!({"pane_id": format!("w5:p{i}"), "workspace_id": "w5"})).collect();
-                return Ok(Output::ok(&serde_json::json!({"result":{"panes":panes}}).to_string()));
-            }
-            std::thread::sleep(self.delay);
-            Ok(Output::ok(&proc_info(&[&["-zsh"]])))
-        }
-    }
-
-    #[test]
-    fn list_panes_stops_scanning_at_the_deadline() {
-        let slow = SlowPanes { delay: Duration::from_millis(60), calls: Default::default() };
-        let h = HerdrCli::new(&slow, None).with_timeout(Duration::from_secs(5));
-        let start = std::time::Instant::now();
-        let err = h.list_panes("w5", start + Duration::from_millis(100)).unwrap_err().to_string();
-        assert!(err.contains("prazo"), "{err}");
-        let infos: Vec<Cmd> = slow.calls.borrow().iter().filter(|c| c.line().contains("process-info")).cloned().collect();
-        assert!(infos.len() <= 2, "parou entre panes, não varreu os 5: {}", infos.len());
-        assert!(start.elapsed() < Duration::from_millis(250), "{:?}", start.elapsed());
-        // cada chamada usa no máximo o tempo que resta
-        assert!(infos.iter().all(|c| c.timeout <= Duration::from_millis(100)), "{:?}", infos.iter().map(|c| c.timeout).collect::<Vec<_>>());
-
-        let slow = SlowPanes { delay: Duration::ZERO, calls: Default::default() };
-        let h = HerdrCli::new(&slow, None);
-        let err = h.list_panes("w5", std::time::Instant::now()).unwrap_err().to_string();
-        assert!(err.contains("prazo"), "{err}");
-        assert!(slow.calls.borrow().is_empty(), "prazo vencido: nenhuma chamada");
-    }
-
-    #[test]
-    fn ui_routing_resolves_bin_and_session_from_env() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| {
-            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
-        };
-        let both = UiRouting::resolve(env(&[("HERDR_BIN_PATH", "/opt/herdr/bin/herdr"), ("HERDR_SOCKET_PATH", "/tmp/s.sock")]), Some("main".into()));
-        assert_eq!(both, UiRouting { bin: "/opt/herdr/bin/herdr".into(), session: None });
-        let none = UiRouting::resolve(env(&[]), Some("main".into()));
-        assert_eq!(none, UiRouting { bin: "herdr".into(), session: Some("main".into()) });
-        let empty_bin = UiRouting::resolve(env(&[("HERDR_BIN_PATH", "")]), None);
-        assert_eq!(empty_bin.bin, "herdr");
-    }
-
-    #[test]
-    fn routed_cli_uses_bin_session_and_timeout() {
-        let fake = FakeRunner::new();
-        fake.on("worktree list", Output::ok(r#"{"result":{"worktrees":[]}}"#));
-        fake.on("worktree list", Output::ok(r#"{"result":{"worktrees":[]}}"#));
-        let r = UiRouting { bin: "/opt/herdr/bin/herdr".into(), session: None };
-        HerdrCli::routed(&fake, &r).with_timeout(Duration::from_secs(5)).find_open_workspace(Path::new("/r"), Path::new("/w")).unwrap();
-        let r = UiRouting { bin: "herdr".into(), session: Some("main".into()) };
-        HerdrCli::routed(&fake, &r).find_open_workspace(Path::new("/r"), Path::new("/w")).unwrap();
+        assert_eq!(created.workspace_id, space_id(Path::new("/w/o/r/pr-7")));
         let calls = fake.calls.borrow();
-        assert!(calls[0].line().starts_with("/opt/herdr/bin/herdr worktree list"), "{}", calls[0].line());
-        assert_eq!(calls[0].timeout, Duration::from_secs(5));
-        assert!(calls[1].line().starts_with("herdr --session main worktree list"));
-        assert_eq!(calls[1].timeout, Duration::from_secs(60), "timeout padrão do núcleo continua 60 s");
+        assert_eq!(calls[0].args, ["worktree", "add", "-q", "-b", "feat/x", "/w/o/r/pr-7", "origin/feat/x"]);
+        assert_eq!(calls[0].cwd.as_deref(), Some(Path::new("/r")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "--force")));
+        assert!(calls[1].args.contains(&format!("herdr.space={}", created.workspace_id)));
+        assert!(calls[1].args.contains(&"reviewq.worktree=/w/o/r/pr-7".to_string()));
+        assert!(calls[1].args.contains(&"--no-parent".to_string()) && calls[1].args.contains(&"--keep".to_string()));
+        let rename: Value = serde_json::from_str(calls[3].args.last().unwrap()).unwrap();
+        assert_eq!(rename["name"], label);
     }
 
     #[test]
-    fn fake_herdr_creates_and_removes_real_worktree() {
-        let fx = crate::testutil::fixture("feat/x");
-        crate::git::Git::new(&crate::runner::RealRunner).fetch_branch(&fx.clone, "feat/x").unwrap();
-        let h = FakeHerdr::new();
-        let path = fx.root.join("wt/pr-1");
-        let c = h
-            .create_worktree(&CreateReq { repo: fx.clone.clone(), branch: "feat/x".into(), base: "origin/feat/x".into(), path: path.clone(), label: "x".into() })
-            .unwrap();
-        assert!(path.join("feature.txt").exists());
-        assert_eq!(h.find_workspace(&fx.clone, &path).unwrap(), Some(c.workspace_id.clone()));
-        h.remove_worktree(&c.workspace_id).unwrap();
-        assert!(!path.exists());
+    fn create_survives_closed_window_without_naming_the_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("herdr-app ls", Output::fail(1, r#"{"error":"Herdr is not running"}"#));
+        let req = CreateReq { repo: "/r".into(), branch: "b".into(), base: "origin/b".into(), path: "/w/pr-1".into(), label: "#1".into() };
+        assert!(app(&fake, dir.path()).create_worktree(&req).is_ok());
+        assert!(fake.lines().iter().all(|l| !l.contains("space.rename")));
+    }
+
+    #[test]
+    fn names_the_space_only_after_the_window_adopts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        let path = dir.path().join("pr-1");
+        std::fs::create_dir_all(&path).unwrap();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
+        fake.on("hc run", Output::ok(r#"{"address":"t4"}"#));
+        fake.on("herdr-app ls", Output::ok(&listed(&["outro"])));
+        fake.on("herdr-app ls", Output::ok(&listed(&["outro", &space_id(&path)])));
+        fake.on("space.rename", Output::ok(r#"{"ok":true}"#));
+        app(&fake, dir.path()).find_workspace(Path::new("/r"), &path, "#1 x").unwrap();
+        let lines = fake.lines();
+        assert_eq!(lines.iter().filter(|l| l.starts_with("herdr-app ls")).count(), 2);
+        assert!(lines.last().unwrap().contains("space.rename"));
+    }
+
+    #[test]
+    fn create_fails_without_opening_space_when_git_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("git worktree add", Output::fail(128, "fatal: a branch named 'b' already exists"));
+        let req = CreateReq { repo: "/r".into(), branch: "b".into(), base: "origin/b".into(), path: "/w/pr-1".into(), label: "#1".into() };
+        let err = app(&fake, dir.path()).create_worktree(&req).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"));
+        assert_eq!(fake.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn find_open_workspace_never_opens_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"finished"}]}"#));
+        let h = app(&fake, dir.path());
+        let path = dir.path().join("pr-1");
+        assert_eq!(h.find_open_workspace(Path::new("/r"), &path).unwrap(), Some(space_id(&path)));
+        assert_eq!(h.find_open_workspace(Path::new("/r"), &path).unwrap(), None);
+        assert!(fake.lines()[0].contains(&format!("--label herdr.space={}", space_id(&path))));
+        assert_eq!(fake.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn find_workspace_opens_space_only_when_worktree_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        let existing = dir.path().join("pr-1");
+        std::fs::create_dir_all(&existing).unwrap();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
+        fake.on("hc run", Output::ok(r#"{"address":"t4"}"#));
+        fake.on("herdr-app ls", Output::ok(&listed(&[&space_id(&existing)])));
+        fake.on("space.rename", Output::ok(r#"{"ok":true}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
+        let h = app(&fake, dir.path());
+        assert_eq!(h.find_workspace(Path::new("/r"), &existing, "#1 x").unwrap(), Some(space_id(&existing)));
+        assert_eq!(h.find_workspace(Path::new("/r"), &dir.path().join("sumiu"), "#2").unwrap(), None);
+        assert!(!fake.lines().last().unwrap().contains("hc run"));
+    }
+
+    #[test]
+    fn close_kills_every_live_terminal_of_the_space_even_with_window_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("space.close", Output::fail(1, r#"{"error":"Herdr is not running"}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"},{"address":"t5","state":"live"}]}"#));
+        fake.on("hc kill t3", Output::ok(""));
+        fake.on("hc kill t5", Output::ok(""));
+        app(&fake, dir.path()).close_workspace("rq-1").unwrap();
+        let lines = fake.lines();
+        assert!(lines[1].contains("--label herdr.space=rq-1"));
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn close_reports_kill_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("space.close", Output::ok(r#"{"ok":true}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc kill t3", Output::fail(1, "no such terminal"));
+        assert!(app(&fake, dir.path()).close_workspace("rq-1").is_err());
+    }
+
+    #[test]
+    fn focus_reports_app_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("space.select", Output::ok(r#"{"ok":true}"#));
+        fake.on("space.select", Output::fail(1, r#"{"error":"no space rq-9"}"#));
+        let h = app(&fake, dir.path());
+        h.focus_workspace("rq-1").unwrap();
+        assert!(format!("{:#}", h.focus_workspace("rq-9").unwrap_err()).contains("no space rq-9"));
+        let sent: Value = serde_json::from_str(fake.calls.borrow()[0].args.last().unwrap()).unwrap();
+        assert_eq!(sent["id"], "rq-1");
+    }
+
+    #[test]
+    fn notify_appends_to_outbox_and_keeps_only_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        let h = app(&fake, dir.path());
+        for i in 0..(OUTBOX_KEEP + 3) {
+            h.notify(&format!("#{i} pronto"), "título", "request", Some("rq-1")).unwrap();
+        }
+        let text = std::fs::read_to_string(dir.path().join("notifications.jsonl")).unwrap();
+        let notices: Vec<Notice> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(notices.len(), OUTBOX_KEEP);
+        assert_eq!(notices[0].title, "#3 pronto");
+        assert_eq!(notices.last().unwrap().space.as_deref(), Some("rq-1"));
+        assert!(fake.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn list_agents_reads_foreground_cwd_of_known_agents_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[
+            {"address":"t2","agent":"claude-code","cwd":"/w/pr-1","state":"live"},
+            {"address":"t3","agent":"zsh","cwd":"/w/pr-2","state":"live"}]}"#));
+        fake.on("hc get t2", Output::ok(r#"{"address":"t2","foreground":{"cwd":"/w/pr-1/app"}}"#));
+        let agents = app(&fake, dir.path()).list_agents(far()).unwrap();
+        assert_eq!(
+            agents,
+            vec![AgentInfo { agent: "claude".into(), cwd: Some("/w/pr-1".into()), foreground_cwd: Some("/w/pr-1/app".into()) }]
+        );
+        assert_eq!(fake.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn list_agents_respects_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        assert!(app(&fake, dir.path()).list_agents(Instant::now()).is_err());
+        assert!(fake.calls.borrow().is_empty());
     }
 }

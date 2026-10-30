@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub const LABEL: &str = "dev.cirdes.herdr-reviewq";
+pub const LABEL: &str = "dev.jacksonpires.herdr-app-reviewq";
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -111,7 +111,7 @@ pub fn install(paths: &Paths) -> Result<()> {
     if !paths.config_file.exists() {
         bail!("crie {} antes (veja config.example.toml)", paths.config_file.display());
     }
-    let exe = paths.home.join(".local/bin/herdr-reviewq");
+    let exe = paths.home.join(".local/bin/herdr-app-reviewq");
     install_binary(&std::env::current_exe()?, &exe)?;
     std::fs::create_dir_all(&paths.state_dir)?;
     let target = plist_path(paths);
@@ -167,21 +167,9 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn plugin_manifest_matches_code() {
-        let m: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
-        assert_eq!(m["id"].as_str(), Some(crate::herdr::PLUGIN_ID));
-        assert_eq!(m["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
-        assert_eq!(m["panes"][0]["id"].as_str(), Some("tui"));
-        let ids: Vec<&str> = m["actions"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["open", "sync-now", "first-ready"]);
-        let wrapper = include_str!("../bin/herdr-reviewq");
-        assert!(wrapper.contains("exec \"$HOME/.local/bin/herdr-reviewq\" \"$@\""));
-    }
-
-    #[test]
     fn plist_is_valid_and_has_stable_paths() {
-        let xml = plist(Path::new("/Users/c"), Path::new("/Users/c/.local/bin/herdr-reviewq"), Path::new("/Users/c/.local/state/herdr-reviewq"));
-        assert!(xml.contains("<string>/Users/c/.local/bin/herdr-reviewq</string><string>daemon</string>"));
+        let xml = plist(Path::new("/Users/c"), Path::new("/Users/c/.local/bin/herdr-app-reviewq"), Path::new("/Users/c/.local/state/herdr-app-reviewq"));
+        assert!(xml.contains("<string>/Users/c/.local/bin/herdr-app-reviewq</string><string>daemon</string>"));
         assert!(xml.contains("/Users/c/.local/share/mise/shims:"));
         assert!(xml.contains("<key>KeepAlive</key><true/>"));
         assert!(xml.contains("<key>ExitTimeOut</key><integer>120</integer>"));
@@ -199,7 +187,7 @@ mod tests {
     fn install_binary_copies_and_replaces_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("novo");
-        let target = dir.path().join("bin/herdr-reviewq");
+        let target = dir.path().join("bin/herdr-app-reviewq");
         std::fs::write(&src, "v2").unwrap();
         install_binary(&src, &target).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "v2");

@@ -9,6 +9,7 @@ pub mod git;
 pub mod github;
 pub mod github_extras;
 pub mod herdr;
+pub mod panel;
 pub mod paths;
 pub mod reconcile;
 pub mod requests;
@@ -19,7 +20,6 @@ pub mod stacks;
 pub mod state;
 pub mod status;
 pub mod today;
-pub mod tui;
 pub mod ui;
 #[cfg(test)]
 pub mod testutil;
