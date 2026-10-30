@@ -1,5 +1,7 @@
 # herdr-app-reviewq
 
+![The reviewq panel in the Herdr app, with made-up data](assets/panel.png)
+
 A macOS daemon that turns your GitHub review queue into ready-to-use spaces in the [Herdr app](https://herdr.dev), plus a Herdr app mod that shows the queue.
 
 This is a port of [cirdes/herdr-reviewq](https://github.com/cirdes/herdr-reviewq), which targets the `herdr` terminal multiplexer, to the Herdr desktop app (`herdr-app` and herdr-core, `hc`). The daemon, the GitHub sync and the safety guarantees are the same; what changed is how it opens spaces, detects agents, notifies you and shows the panel.
@@ -144,6 +146,14 @@ Logs live in `~/.local/state/herdr-app-reviewq/`: `daemon.log`, plus one redacte
 - **Diffs match GitHub's.** reviewq fetches the PR's base branch (`baseRefName`; for a stacked PR, the branch of the PR below it) into `origin/<base>` when it creates the worktree, on every push by the author and whenever GitHub retargets the PR. Local branches, like the clone's `main`, are never touched, so compare against `origin/<base>`, not `main`.
 - **reviewr opens on the right base.** In each worktree, the base is stored as the reviewr base pick (ref `refs/worktree/reviewr/base-pick`, read by the `persiyanov.reviewr` herdr plugin). A base you pick yourself is never overwritten.
 - **Removing a worktree closes its space.** Its terminals are ended (`hc kill`), which also ends an agent still open there; a worktree is only removed when it is pristine.
+
+## Development
+
+`cargo test` runs the suite. The README screenshot uses made-up data:
+
+1. `cargo test --lib readme_screenshot -- --ignored` writes `assets/demo-panel.json`.
+2. Open the panel on that file in a tab: `herdr-app do tab.new "{\"name\":\"reviewq demo\",\"mod\":\"reviewq\",\"props\":{\"panel\":true,\"demo\":\"$PWD/assets/demo-panel.json\"}}"`.
+3. `herdr-app shot`, crop the pane and save it as `assets/panel.png`. Crop out the sidebar and other panes: they show your real spaces.
 
 ## License
 

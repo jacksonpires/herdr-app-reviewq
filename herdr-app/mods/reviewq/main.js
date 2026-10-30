@@ -29,6 +29,9 @@ function confirmText(kind, key) {
 }
 
 async function loadView(sent) {
+  // Prop `demo`: a saved `panel` JSON (assets/demo-panel.json) instead of the binary, for screenshots.
+  const demo = props()?.demo;
+  if (demo) return JSON.parse(await readTextFile(demo));
   const args = ["panel"];
   if (sent) {
     args.push("--sent-id", sent.id, "--sent-kind", sent.kind, "--sent-at", sent.at);
@@ -54,7 +57,7 @@ export default class Reviewq extends View {
       this.handle.focus();
       cx.timer.after(100, () => this.handle.focus());
     }
-    this.watching = false;
+    this.watching = Boolean(props()?.demo);
     cx.spawn(async (cx) => this.reload(cx));
     cx.timer.every(TICK, (cx) => cx.spawn(async (cx) => this.reload(cx)));
   }

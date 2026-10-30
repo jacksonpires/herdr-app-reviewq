@@ -159,6 +159,21 @@ pub fn missing_worktrees(state: &State) -> BTreeSet<PrKey> {
     state.prs.values().filter(|r| !r.path.exists()).map(|r| r.key.clone()).collect()
 }
 
+/// A visão em JSON para o mod: as linhas ganham `key` ("owner/repo#n") e, nas de review, o
+/// caminho do log de setup; a raiz ganha as pastas que o mod observa.
+pub fn to_json(view: &View, paths: &crate::paths::Paths) -> serde_json::Result<serde_json::Value> {
+    let mut json = serde_json::to_value(view)?;
+    for (row, out) in view.rows.iter().zip(json["rows"].as_array_mut().into_iter().flatten()) {
+        out["key"] = row.id.key().to_string().into();
+        if let Some(k) = row.id.review() {
+            out["log"] = paths.setup_log(k).to_string_lossy().into_owned().into();
+        }
+    }
+    json["state_dir"] = paths.state_dir.to_string_lossy().into_owned().into();
+    json["notifications"] = paths.notifications_file().to_string_lossy().into_owned().into();
+    Ok(json)
+}
+
 impl ViewConfig {
     pub fn of(cfg: &crate::config::Config) -> Self {
         Self {
@@ -823,5 +838,90 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert_eq!(v.row(&rid(1)).unwrap().ci, "?");
         assert_eq!(v.row(&rid(2)).unwrap().ci, "✗ rspec");
+    }
+
+    /// Gera `assets/demo-panel.json` para o print do README, com dados fictícios:
+    /// `cargo test --lib readme_screenshot -- --ignored`; o print sai do mod com a prop `demo` (README).
+    #[test]
+    #[ignore]
+    fn readme_screenshot() {
+        use crate::state::ReviewsTodaySuccess;
+        let now = Utc::now();
+        let mut s = State::default();
+        s.repos.insert("acme/app".into(), RepoStatus { ok: true, last_sync: Some(now - chrono::Duration::seconds(20)), ..Default::default() });
+        let pr = |n: u64, author: &str, title: &str, phase: Phase, age_min: i64| {
+            let mut r = PrRecord::fixture("acme/app", n, "feat/x", "s");
+            r.author = author.into();
+            r.title = title.into();
+            r.phase = phase;
+            r.first_seen_at = now - chrono::Duration::minutes(age_min);
+            r.url = format!("https://github.com/acme/app/pull/{n}");
+            r
+        };
+        let mut bottom = pr(4821, "marina", "feat: exporta relatório de fornecedores em CSV", Phase::Ready, 95);
+        bottom.head_ref = "feat/export-csv".into();
+        s.insert(bottom);
+        let mut top = pr(4830, "marina", "feat: agenda a exportação de fornecedores por e-mail", Phase::Ready, 60);
+        top.head_ref = "feat/export-schedule".into();
+        top.base_ref = "feat/export-csv".into();
+        s.insert(top);
+        s.insert(pr(4834, "bia", "refactor: extrai cliente HTTP do módulo de cotações", Phase::Preparing, 3));
+        s.insert(pr(4835, "rafa", "test: cobre reprocessamento de webhooks", Phase::Failed { step: "pnpm install".into(), reason: "exit 1".into() }, 8));
+        let mut leaving = pr(4812, "lu", "feat: filtro por categoria no painel", Phase::Ready, 300);
+        leaving.remote = Remote::NotPending;
+        leaving.not_pending_since = Some(now - chrono::Duration::minutes(3));
+        s.insert(leaving);
+        let mut adopted = pr(4799, "voce", "feat: aprovação em lote de cadastros", Phase::Ready, 900);
+        adopted.ownership = Ownership::Adopted { reason: "trocou para stack/lote-2".into(), at: now };
+        s.insert(adopted);
+        let ci = |state: crate::ci::CiState, check: Option<&str>, mins: Option<i64>| crate::ci::Ci {
+            sha: "s".into(),
+            state,
+            failed_check: check.map(String::from),
+            finished_at: mins.map(|m| now - chrono::Duration::minutes(m)),
+            observed_at: now,
+        };
+        for (n, started, c) in [
+            (4821, Some(40), ci(crate::ci::CiState::Success, None, Some(12))),
+            (4830, Some(15), ci(crate::ci::CiState::Pending, None, None)),
+            (4834, None, ci(crate::ci::CiState::Pending, None, None)),
+            (4835, None, ci(crate::ci::CiState::Failure, Some("rspec"), None)),
+            (4812, Some(200), ci(crate::ci::CiState::Success, None, Some(180))),
+        ] {
+            let r = s.get_mut(&PrKey::new("acme/app", n)).unwrap();
+            r.work_started_at = started.map(|m| now - chrono::Duration::minutes(m));
+            r.work_agent = started.map(|_| "claude".to_string());
+            r.ci = Some(c);
+        }
+        let mine = |n: u64, title: &str, draft: bool, c: crate::ci::Ci, age_min: i64| crate::state::MyPr {
+            number: n,
+            title: title.into(),
+            url: format!("https://github.com/acme/app/pull/{n}"),
+            draft,
+            created_at: now - chrono::Duration::minutes(age_min),
+            head_sha: "s".into(),
+            ci: Some(c),
+        };
+        s.my_prs.repos.insert(
+            "acme/app".into(),
+            crate::state::MyPrsRepo {
+                prs: vec![
+                    mine(4840, "feat: importa fornecedores por planilha", false, ci(crate::ci::CiState::Pending, None, None), 30),
+                    mine(4827, "chore: atualiza dependências de teste", true, ci(crate::ci::CiState::Success, None, Some(95)), 300),
+                ],
+                opened_24h: 2,
+                as_of: now - chrono::Duration::seconds(20),
+            },
+        );
+        let day = crate::today::local_day(now);
+        s.reviews_today.last_success = Some(ReviewsTodaySuccess {
+            day, count: 6, per_repo: [("acme/app".to_string(), 6)].into(), as_of: now - chrono::Duration::minutes(2),
+            viewer: "voce".into(), repos: vec!["acme/app".into()],
+        });
+        let cfg = ViewConfig { repos: vec!["acme/app".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) };
+        let view = View::build(Some(&s), &UiState::default(), &cfg, &UiFacts::default(), now);
+        let json = to_json(&view, &crate::paths::Paths::from_home("/Users/voce".into())).unwrap();
+        std::fs::create_dir_all("assets").unwrap();
+        std::fs::write("assets/demo-panel.json", serde_json::to_string_pretty(&json).unwrap() + "\n").unwrap();
     }
 }

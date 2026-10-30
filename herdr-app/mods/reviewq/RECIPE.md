@@ -24,6 +24,7 @@ Your GitHub review queue inside Herdr: a status bar block with how many reviews 
 - The bar shows toasts for new lines in `notifications.jsonl` (`notify`, with `space.select` as the click action when the line has a space) and plays `done` or `blocked` for the daemon's `done` / `request` sounds. The last shown notice is kept in shared `"reviewq.notices.seen"`; on the first run everything already in the file counts as seen.
 - Keys in the panel: ↑↓/j k move, enter runs `herdr-app-reviewq focus pr --pr <key>` and closes the dialog (on "Meus PRs", opens the URL), `o` opens the URL, `l` opens the setup log with `less +G` in a new tab, `s` sync, `R` retry, `a` adopt and `r` release after `y`/`n`; esc/q closes. Ineligible actions print the reason in the footer. Before sending a confirmed request, the row is checked again against the latest view.
 - A request is sent with `herdr-app-reviewq request <kind> --pr <key> --json`; its id and time go back to `panel --sent-…` so the footer shows "enviado…", then the daemon's verdict.
+- Prop `demo` (a path to a saved `panel` JSON, such as `assets/demo-panel.json`) draws that file instead of calling the binary and watches nothing: it is how the README screenshot is made with made-up data.
 - Clicking the bar opens the panel; `mod.open:reviewq` opens it from a key (`mod.json` sets the dialog size).
 
 ## Built from

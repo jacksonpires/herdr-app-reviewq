@@ -112,16 +112,7 @@ fn panel_json(paths: &Paths, sent: Option<Sent>) -> Result<serde_json::Value> {
     let facts = UiFacts { missing_worktrees: state.as_ref().map(panel::missing_worktrees).unwrap_or_default() };
     let ui = UiState { sent: sent.into_iter().collect(), ..Default::default() };
     let view = View::build(state.as_ref(), &ui, &ViewConfig::of(&cfg), &facts, chrono::Utc::now());
-    let mut json = serde_json::to_value(&view)?;
-    for (row, out) in view.rows.iter().zip(json["rows"].as_array_mut().into_iter().flatten()) {
-        out["key"] = row.id.key().to_string().into();
-        if let Some(k) = row.id.review() {
-            out["log"] = paths.setup_log(k).to_string_lossy().into_owned().into();
-        }
-    }
-    json["state_dir"] = paths.state_dir.to_string_lossy().into_owned().into();
-    json["notifications"] = paths.notifications_file().to_string_lossy().into_owned().into();
-    Ok(json)
+    Ok(panel::to_json(&view, paths)?)
 }
 
 fn main() -> Result<()> {

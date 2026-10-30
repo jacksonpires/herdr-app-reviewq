@@ -1,0 +1,232 @@
+{
+  "alerts": [],
+  "empty_reason": null,
+  "header": {
+    "errors": [],
+    "stale": false,
+    "sync": "sync 20s"
+  },
+  "notifications": "/Users/voce/.local/state/herdr-app-reviewq/notifications.jsonl",
+  "opened_24h": "2",
+  "pending": "5",
+  "request_line": null,
+  "rows": [
+    {
+      "author": "marina",
+      "ci": "◐",
+      "eligible": {
+        "adopt": true,
+        "focus": true,
+        "log": true,
+        "release": false,
+        "retry": false
+      },
+      "icon": "●",
+      "id": {
+        "review": {
+          "number": 4830,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4830",
+      "label": "#4830",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4830.log",
+      "section": "started",
+      "stack": "#4821 2/2",
+      "started": "09:26",
+      "status": "pronto",
+      "title": "feat: agenda a exportação de fornecedores por e-mail",
+      "url": "https://github.com/acme/app/pull/4830"
+    },
+    {
+      "author": "marina",
+      "ci": "✓ 12min",
+      "eligible": {
+        "adopt": true,
+        "focus": true,
+        "log": true,
+        "release": false,
+        "retry": false
+      },
+      "icon": "●",
+      "id": {
+        "review": {
+          "number": 4821,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4821",
+      "label": "#4821",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4821.log",
+      "section": "started",
+      "stack": "#4821 1/2",
+      "started": "09:01",
+      "status": "pronto",
+      "title": "feat: exporta relatório de fornecedores em CSV",
+      "url": "https://github.com/acme/app/pull/4821"
+    },
+    {
+      "author": "rafa",
+      "ci": "✗ rspec",
+      "eligible": {
+        "adopt": true,
+        "focus": true,
+        "log": true,
+        "release": false,
+        "retry": true
+      },
+      "icon": "✗",
+      "id": {
+        "review": {
+          "number": 4835,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4835",
+      "label": "#4835",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4835.log",
+      "section": "pending",
+      "stack": "Não",
+      "started": "–",
+      "status": "falhou · pnpm install",
+      "title": "test: cobre reprocessamento de webhooks",
+      "url": "https://github.com/acme/app/pull/4835"
+    },
+    {
+      "author": "bia",
+      "ci": "◐",
+      "eligible": {
+        "adopt": true,
+        "focus": true,
+        "log": true,
+        "release": false,
+        "retry": false
+      },
+      "icon": "◐",
+      "id": {
+        "review": {
+          "number": 4834,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4834",
+      "label": "#4834",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4834.log",
+      "section": "pending",
+      "stack": "Não",
+      "started": "–",
+      "status": "preparando",
+      "title": "refactor: extrai cliente HTTP do módulo de cotações",
+      "url": "https://github.com/acme/app/pull/4834"
+    },
+    {
+      "author": "você",
+      "ci": "◐",
+      "eligible": {
+        "adopt": false,
+        "focus": false,
+        "log": false,
+        "release": false,
+        "retry": false
+      },
+      "icon": "◐",
+      "id": {
+        "mine": {
+          "number": 4840,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4840",
+      "label": "#4840",
+      "section": "mine",
+      "stack": "",
+      "started": "–",
+      "status": "aberto",
+      "title": "feat: importa fornecedores por planilha",
+      "url": "https://github.com/acme/app/pull/4840"
+    },
+    {
+      "author": "você",
+      "ci": "✓ 1h",
+      "eligible": {
+        "adopt": false,
+        "focus": false,
+        "log": false,
+        "release": false,
+        "retry": false
+      },
+      "icon": "✓",
+      "id": {
+        "mine": {
+          "number": 4827,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4827",
+      "label": "#4827",
+      "section": "mine",
+      "stack": "",
+      "started": "–",
+      "status": "rascunho",
+      "title": "chore: atualiza dependências de teste",
+      "url": "https://github.com/acme/app/pull/4827"
+    },
+    {
+      "author": "voce",
+      "ci": "",
+      "eligible": {
+        "adopt": false,
+        "focus": true,
+        "log": true,
+        "release": true,
+        "retry": false
+      },
+      "icon": "◆",
+      "id": {
+        "review": {
+          "number": 4799,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4799",
+      "label": "#4799",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4799.log",
+      "section": "adopted",
+      "stack": "Não",
+      "started": "–",
+      "status": "seu · trocou para stack/lote-2 · ainda pendente",
+      "title": "feat: aprovação em lote de cadastros",
+      "url": "https://github.com/acme/app/pull/4799"
+    },
+    {
+      "author": "lu",
+      "ci": "✓ 3h",
+      "eligible": {
+        "adopt": true,
+        "focus": true,
+        "log": true,
+        "release": false,
+        "retry": false
+      },
+      "icon": "●",
+      "id": {
+        "review": {
+          "number": 4812,
+          "repo": "acme/app"
+        }
+      },
+      "key": "acme/app#4812",
+      "label": "#4812",
+      "log": "/Users/voce/.local/state/herdr-app-reviewq/logs/acme-app-pr-4812.log",
+      "section": "leaving",
+      "stack": "Não",
+      "started": "06:21",
+      "status": "pronto · sai em 12min",
+      "title": "feat: filtro por categoria no painel",
+      "url": "https://github.com/acme/app/pull/4812"
+    }
+  ],
+  "state_dir": "/Users/voce/.local/state/herdr-app-reviewq",
+  "today": "6",
+  "today_detail": "atualizado há 2min"
+}
