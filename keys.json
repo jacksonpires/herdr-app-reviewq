@@ -1,0 +1,3 @@
+{
+  "global": { "cmd-shift-r": "mod.open:reviewq" }
+}

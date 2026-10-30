@@ -1,6 +1,6 @@
 # herdr-app-reviewq
 
-![The reviewq panel in the Herdr app, with made-up data](assets/panel.png)
+![The reviewq panel in the Herdr app, with made-up data](preview.png)
 
 A macOS daemon that turns your GitHub review queue into ready-to-use spaces in the [Herdr app](https://herdr.dev), plus a Herdr app mod that shows the queue.
 
@@ -55,7 +55,7 @@ When someone requests your review on a pull request, reviewq creates a git workt
 3. Add the mod to the Herdr app. Link it, so `git pull` updates it:
 
    ```sh
-   ln -s "$PWD/herdr-app/mods/reviewq" ~/.config/herdr-app/mods/reviewq
+   ln -s "$PWD/mods/reviewq" ~/.config/herdr-app/mods/reviewq
    herdr-app check ~/.config/herdr-app/mods/reviewq
    ```
 
@@ -153,7 +153,7 @@ Logs live in `~/.local/state/herdr-app-reviewq/`: `daemon.log`, plus one redacte
 
 1. `cargo test --lib readme_screenshot -- --ignored` writes `assets/demo-panel.json`.
 2. Open the panel on that file in a tab: `herdr-app do tab.new "{\"name\":\"reviewq demo\",\"mod\":\"reviewq\",\"props\":{\"panel\":true,\"demo\":\"$PWD/assets/demo-panel.json\"}}"`.
-3. `herdr-app shot`, crop the pane and save it as `assets/panel.png`. Crop out the sidebar and other panes: they show your real spaces.
+3. `herdr-app shot`, crop the pane and save it as `preview.png`. Crop out the sidebar and other panes: they show your real spaces.
 
 ## License
 

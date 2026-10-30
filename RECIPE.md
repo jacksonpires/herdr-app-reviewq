@@ -1,6 +1,10 @@
 # reviewq
 
-Your GitHub review queue inside Herdr: a status bar block with how many reviews are pending and ready, and a panel (a dialog over the window) that lists every review and your own open PRs, with the worktree state, CI, when you started and whether the PR is stacked. Enter takes you to the PR's space; the daemon that prepares those worktrees lives in the same repo.
+Your GitHub review queue inside Herdr: a status bar block with how many reviews are pending and ready, and a panel (a dialog over the window) that lists every review and your own open PRs, with the worktree state, CI, when you started and whether the PR is stacked. Enter takes you to the PR's space.
+
+**It needs the reviewq daemon** from this repo (macOS, Rust, `gh`): the daemon creates the worktrees and spaces, and its binary `~/.local/bin/herdr-app-reviewq` is where the mod gets its data. Install it as the README says before adding the mod; without it the bar reads `reviewq` in red and the panel shows the error.
+
+![reviewq](preview.png)
 
 ## What you see
 
@@ -30,6 +34,7 @@ Your GitHub review queue inside Herdr: a status bar block with how many reviews 
 ## Built from
 
 - **One mod**, `mods/reviewq/`, `main.js` and `mod.json` (`place: "none"`, `overlay: { kind: "dialog", width: 0.85, height: 0.8 }`).
+- **`keys.json`**: `cmd-shift-r` → `mod.open:reviewq` in `global`. The bar is a block you add to a layout you own (README, step 4).
 - **One view, two roles**: with `props().panel` or `props().overlay` it draws the panel (and takes keyboard focus with a focus handle), otherwise the bar. Only the bar delivers toasts.
 - **The binary** `~/.local/bin/herdr-app-reviewq` (installed by `service install`), run with `exec`. `panel`, `request`, `focus pr`.
 - **Herdr functions**: `exec`, `home`, `readTextFile`, `watchFolder`, `shared`, `setShared`, `props`, `openOverlay`, `closeOverlay`, `notify`, `playSound`, `run` (`tab.new`), `theme`.

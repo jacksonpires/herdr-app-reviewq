@@ -1,4 +1,4 @@
 /target
-herdr-app/mods/*/gpui-kit.d.ts
-herdr-app/mods/*/herdr.d.ts
-herdr-app/mods/*/jsconfig.json
+mods/*/gpui-kit.d.ts
+mods/*/herdr.d.ts
+mods/*/jsconfig.json
