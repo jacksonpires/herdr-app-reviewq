@@ -6,6 +6,8 @@ A macOS daemon that turns your GitHub review queue into ready-to-use spaces in t
 
 This is a port of [cirdes/herdr-reviewq](https://github.com/cirdes/herdr-reviewq), which targets the `herdr` terminal multiplexer, to the Herdr desktop app (`herdr-app` and herdr-core, `hc`). The daemon, the GitHub sync and the safety guarantees are the same; what changed is how it opens spaces, detects agents, notifies you and shows the panel.
 
+> **Desktop support is coming to the original.** [cirdes/herdr-reviewq#7](https://github.com/cirdes/herdr-reviewq/pull/7) adds a `backend = "herdr-app"` option to cirdes/herdr-reviewq, so one install serves both the terminal and the desktop app, with the original TUI as the panel in a desktop space. Once that PR is merged, prefer the original; what stays specific to this repo is the mod (the status bar counters, the toasts and the panel drawn as a native dialog).
+
 When someone requests your review on a pull request, reviewq creates a git worktree for the PR, opens it as a Herdr space and runs the repo's setup commands (`mise install`, `bundle install`, `pnpm install`, and so on). You get a toast when the worktree is ready. Once the PR leaves your queue (you reviewed it, or it was closed or merged), reviewq waits for a grace period and then removes the worktree, but only if you never touched it.
 
 > The panel and messages are in Portuguese.
