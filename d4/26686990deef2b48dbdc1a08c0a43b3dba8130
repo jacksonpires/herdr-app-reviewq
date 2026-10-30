@@ -1,0 +1,26 @@
+RECIPE.md
+  s_14244be44c3488::t_d85b72316d9eeb 37
+  s_14244be44c3488::t_9c062f30138534 3-7
+.gitignore
+  s_14244be44c3488::t_500e1c80716bb8 2-4
+README.md
+  s_14244be44c3488::t_ea21098451f69b 3,58,156
+keys.json
+  s_14244be44c3488::t_e99245023461f1 1-3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d426686990deef2b48dbdc1a08c0a43b3dba8130",
+  "prompts": {},
+  "sessions": {
+    "s_14244be44c3488": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7efc2be9-bf7a-4da8-9e3a-3d71ed20ca71",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Jackson Pires <jackson.pires@gmail.com>"
+    }
+  }
+}
