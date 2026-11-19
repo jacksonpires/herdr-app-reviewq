@@ -156,7 +156,7 @@ Logs live in `~/.local/state/herdr-app-reviewq/`: `daemon.log`, plus one redacte
 
 1. `cargo test --lib readme_screenshot -- --ignored` writes `assets/demo-panel.json`.
 2. Open the panel on that file in a tab: `herdr-app do tab.new "{\"name\":\"reviewq demo\",\"mod\":\"reviewq\",\"props\":{\"panel\":true,\"demo\":\"$PWD/assets/demo-panel.json\",\"query\":\"fornecedores\"}}"`. The `query` prop starts the panel with that search filled in (the current `preview.png` uses `fornecedores`); leave it out for the full list.
-3. `herdr-app shot`, crop the pane and save it as `preview.png`. Crop out the sidebar and other panes: they show your real spaces.
+3. `herdr-app shot`, crop the pane and save it as `preview.png`. Crop out the sidebar and other panes: they show your real spaces. Keep the pane about 1,400px wide, so every column shows and the image keeps the current proportions; on a wide window, open the Files panel on the right to narrow it.
 
 ## License
 
