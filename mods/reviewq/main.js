@@ -84,11 +84,11 @@ export default class Reviewq extends View {
     this.sent = null;
     this.width = 0;
     this.isPanel = Boolean(props()?.panel || props()?.overlay);
-    this.query = "";
+    this.query = props()?.query ?? "";
     this.searching = false;
     this.searchEndedAt = 0;
     if (this.isPanel) {
-      this.input = InputState.new({ placeholder: "buscar por #PR, autor ou título" });
+      this.input = InputState.new({ placeholder: "buscar por #PR, autor ou título", value: this.query });
       this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
       this.input.on("submit", (_e, cx) => this.endSearch(cx));
       this.handle = cx.focus_handle();
