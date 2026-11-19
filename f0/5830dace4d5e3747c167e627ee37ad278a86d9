@@ -1,0 +1,23 @@
+README.md
+  s_bc44e073419975::t_f9268fc0549705 3,158
+RECIPE.md
+  s_bc44e073419975::t_bb83126aa8a8bf 32
+mods/reviewq/main.js
+  s_bc44e073419975::t_5ba48bb9d39363 87,91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f05830dace4d5e3747c167e627ee37ad278a86d9",
+  "prompts": {},
+  "sessions": {
+    "s_bc44e073419975": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a005e5df-b36e-4bff-8084-2a07da756e99",
+        "model": "unknown"
+      },
+      "human_author": "Jackson Pires <jackson.pires@gmail.com>"
+    }
+  }
+}
