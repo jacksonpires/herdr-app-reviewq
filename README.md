@@ -109,6 +109,7 @@ The list has these sections, in order: **Iniciados** (pending reviews where an a
 | Key | Action |
 |---|---|
 | `↑` `↓` / `k` `j` | Move the selection (a click selects too) |
+| `/` | Search: type to filter the rows by PR number, author or title. The match is fuzzy (the letters in order, gaps allowed) and every word has to match; the best matches go first inside each section. `↑` `↓` move while typing, `enter` goes back to the list keeping the filter, `esc` clears it. With a filter on, the first `esc` clears it instead of closing the panel |
 | `enter` | Show the PR's space, opening one if it was closed. On your own PRs, open the PR in the browser |
 | `o` | Open the PR in the browser |
 | `l` | Open the PR's setup log in a new tab |

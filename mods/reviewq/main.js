@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
+import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { exec, home, readTextFile, watchFolder, shared, setShared, props, openOverlay, closeOverlay, notify, playSound, run, theme } from "herdr";
 
 const BIN = () => `${home()}/.local/bin/herdr-app-reviewq`;
@@ -20,7 +20,39 @@ const NOT_ELIGIBLE = {
   adopt: "só dá para adotar um worktree gerenciado pelo daemon",
   release: "só dá para liberar um worktree adotado",
 };
-const FOOTER = "↑↓ mover · enter abrir · o GitHub · l log · s sync · R tentar de novo · a adotar · r liberar · esc fechar";
+const FOOTER = "↑↓ mover · / buscar · enter abrir · o GitHub · l log · s sync · R tentar de novo · a adotar · r liberar · esc fechar";
+const SEARCH_FOOTER = "digite para filtrar por #PR, autor ou título · ↑↓ mover · enter voltar à lista · esc limpar";
+
+// Fuzzy score of `term` in `text`: every character in order, gaps allowed. Higher is better,
+// null when it doesn't match. Contiguous runs and word starts score more, so "lin 89" ranks
+// "LIN-8939" above a title that only scatters those letters.
+function fuzzy(term, text) {
+  if (!term) return 0;
+  const hay = text.toLowerCase();
+  const at = hay.indexOf(term);
+  if (at >= 0) return 100 + term.length * 4 - Math.min(at, 50) / 10 + (at === 0 || /\W/.test(hay[at - 1]) ? 20 : 0);
+  let score = 0, from = 0, last = -2;
+  for (const ch of term) {
+    const i = hay.indexOf(ch, from);
+    if (i < 0) return null;
+    score += i === last + 1 ? 5 : 1;
+    if (i === 0 || /\W/.test(hay[i - 1])) score += 3;
+    last = i; from = i + 1;
+  }
+  return score;
+}
+
+// Every word of the query has to match the PR number, the author or the title.
+function matchRow(query, row) {
+  let total = 0;
+  for (const raw of query.toLowerCase().split(/\s+/).filter(Boolean)) {
+    const term = raw.replace(/^#/, "");
+    const best = Math.max(...[row.label.replace(/^#/, ""), row.author ?? "", row.title ?? ""].map((f) => fuzzy(term, f) ?? -1));
+    if (best < 0) return null;
+    total += best;
+  }
+  return total;
+}
 
 function confirmText(kind, key) {
   if (kind === "adopt") return `adotar ${key}? protege da limpeza automática e cancela o setup em andamento (y/n)`;
@@ -52,7 +84,13 @@ export default class Reviewq extends View {
     this.sent = null;
     this.width = 0;
     this.isPanel = Boolean(props()?.panel || props()?.overlay);
+    this.query = "";
+    this.searching = false;
+    this.searchEndedAt = 0;
     if (this.isPanel) {
+      this.input = InputState.new({ placeholder: "buscar por #PR, autor ou título" });
+      this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
+      this.input.on("submit", (_e, cx) => this.endSearch(cx));
       this.handle = cx.focus_handle();
       this.handle.focus();
       cx.timer.after(100, () => this.handle.focus());
@@ -136,8 +174,41 @@ export default class Reviewq extends View {
       .when(Boolean(v), (el) => el.child(div().text_color(t.dim).child(`${v.today} hoje`)));
   }
 
-  rows() {
+  allRows() {
     return this.view?.rows ?? [];
+  }
+
+  // The rows the panel shows: all of them, or with a query the ones that match, best first
+  // inside each section (sections keep their order).
+  rows() {
+    const all = this.allRows();
+    if (!this.query.trim()) return all;
+    const scored = all.map((row, i) => ({ row, i, score: matchRow(this.query, row) })).filter((x) => x.score !== null);
+    const order = [...new Set(all.map((r) => r.section))];
+    scored.sort((a, b) => order.indexOf(a.row.section) - order.indexOf(b.row.section) || b.score - a.score || a.i - b.i);
+    return scored.map((x) => x.row);
+  }
+
+  startSearch(cx) {
+    this.searching = true;
+    this.input.focus();
+    cx.notify();
+  }
+
+  endSearch(cx) {
+    if (!this.searching) return;
+    this.searching = false;
+    this.searchEndedAt = Date.now();
+    this.handle.focus();
+    cx.notify();
+  }
+
+  clearSearch(cx) {
+    this.searching = false;
+    this.query = "";
+    this.input.set_value("");
+    this.handle.focus();
+    cx.notify();
   }
 
   selectedRow() {
@@ -187,7 +258,7 @@ export default class Reviewq extends View {
       const { kind, row: target } = this.confirm;
       if (k === "y") {
         this.confirm = null;
-        const fresh = rows.find((r) => r.key === target.key && r.id.review);
+        const fresh = this.allRows().find((r) => r.key === target.key && r.id.review);
         if (fresh?.eligible[kind]) cx.spawn(async (cx) => this.request(kind, target.key, cx));
         else this.message = `${target.key} mudou de estado; pedido cancelado`;
       } else if (k === "n" || k === "escape") {
@@ -201,7 +272,21 @@ export default class Reviewq extends View {
 
     this.message = null;
     const i = row ? rows.indexOf(row) : -1;
-    if (k === "up" || k === "k") this.select(rows[Math.max(0, i - 1)]);
+    if (this.searching) {
+      if (k === "escape") this.clearSearch(cx);
+      else if (k === "enter") this.endSearch(cx);
+      else if (k === "up") this.select(rows[Math.max(0, i - 1)]);
+      else if (k === "down") this.select(rows[Math.min(rows.length - 1, i + 1)]);
+      else return;
+      cx.stop_propagation();
+      cx.notify();
+      return;
+    }
+    // The input's submit can reach us before the Enter that caused it: don't open a PR with it.
+    if (k === "enter" && Date.now() - this.searchEndedAt < 300) { cx.stop_propagation(); return; }
+    if (e.key_char === "/") this.startSearch(cx);
+    else if (k === "escape" && this.query) this.clearSearch(cx);
+    else if (k === "up" || k === "k") this.select(rows[Math.max(0, i - 1)]);
     else if (k === "down" || k === "j") this.select(rows[Math.min(rows.length - 1, i + 1)]);
     else if (k === "escape" || k === "q") this.close();
     else if (k === "s") cx.spawn(async (cx) => this.request("sync", null, cx));
@@ -259,7 +344,9 @@ export default class Reviewq extends View {
     const head = this.line({ label: "PR", icon: "", status: "Estado", ci: "CI", started: "Início", author: "Autor", stack: "Empilhado", title: "Título" }, c, t, { dim: true });
     const items = [head];
     let section = null;
-    for (const row of this.rows()) {
+    const shown = this.rows();
+    if (this.query.trim() && !shown.length) items.push(div().px(10).pt(10).text_color(t.dim).child(`nada encontrado para "${this.query.trim()}"`));
+    for (const row of shown) {
       if (row.section !== section) {
         section = row.section;
         items.push(div().px(10).pt(10).pb(2).text_size(12).font_semibold().text_color(t.foreground).child(SECTION[section] ?? section));
@@ -301,7 +388,15 @@ export default class Reviewq extends View {
     const bad = v && (v.header.stale || v.header.errors.length > 0);
     const footer = this.confirm
       ? div().text_color(t.blocked).font_semibold().child(confirmText(this.confirm.kind, this.confirm.row.key))
-      : div().text_color(this.message ? t.foreground : t.dim).child(this.message ?? FOOTER);
+      : div().text_color(this.message ? t.foreground : t.dim).child(this.message ?? (this.searching ? SEARCH_FOOTER : FOOTER));
+    const filtering = this.searching || Boolean(this.query);
+    const search = h_flex().h(30).px(10).gap(8).items_center().rounded(6).border_1().border_color(this.searching ? t.accent : t.border)
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.startSearch(cx); })
+      .child(div().text_color(t.dim).child("/"))
+      .child(this.searching
+        ? div().flex_1().min_w(0).h_full().flex().items_center().child(Input.new(this.input).h_full().w_full().text_size(13).text_color(t.foreground))
+        : div().flex_1().min_w(0).truncate().text_color(t.foreground).child(this.query))
+      .child(div().text_size(11).text_color(t.dim).child(v ? `${this.rows().length} de ${this.allRows().length}` : ""));
     const root = v_flex().id("root").track_focus(this.handle).size_full().p(16).gap(12).bg(t.popover).text_size(13)
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
       .on_key_down((e, cx) => this.onKey(e, cx))
@@ -319,6 +414,7 @@ export default class Reviewq extends View {
         .child(this.counter("Feitas hoje", v.today, t))
         .child(this.counter("Abertos 24h", v.opened_24h, t))
         .child(div().pb(6).text_size(12).text_color(t.dim).child(v.today_detail)))
+      .when(filtering, (el) => el.child(search))
       .child(this.list(t))
       .when(Boolean(this.error), (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error)))
       .child(this.bottom(t))
