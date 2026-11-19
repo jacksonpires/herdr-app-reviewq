@@ -1,0 +1,19 @@
+README.md
+  s_bc44e073419975::t_0f6f5147be4402 159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "16d534b1dddcd30ae0e870ef1ff7bb2fd36cfdd5",
+  "prompts": {},
+  "sessions": {
+    "s_bc44e073419975": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a005e5df-b36e-4bff-8084-2a07da756e99",
+        "model": "unknown"
+      },
+      "human_author": "Jackson Pires <jackson.pires@gmail.com>"
+    }
+  }
+}
